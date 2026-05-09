@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const bcrypt = require\\('bcrypt'\\); bcrypt.hash\\('12345678', 10\\).then\\(h => console.log\\(h\\)\\);\")",
+      "Bash(claude update *)",
+      "Bash(claude *)"
+    ]
+  }
+}

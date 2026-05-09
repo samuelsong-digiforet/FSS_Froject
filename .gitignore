@@ -1,0 +1,45 @@
+cat > .gitignore << 'EOF'
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Docker volumes (로컬 데이터)
+data/
+
+# Test
+coverage/
+
+# Temp
+tmp/
+temp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+EOF
