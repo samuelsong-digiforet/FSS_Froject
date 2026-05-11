@@ -2515,6 +2515,7 @@ export default function MeshCropEditor({
   const [saveEditLoading, setSaveEditLoading] = useState(false);
   const [saveExtractedAssetLoading, setSaveExtractedAssetLoading] = useState(false);
   const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [versionPanelTab, setVersionPanelTab] = useState<'save' | 'load'>('save');
   const [versionDescription, setVersionDescription] = useState('');
   const [versionSaving, setVersionSaving] = useState(false);
@@ -3995,6 +3996,59 @@ export default function MeshCropEditor({
 
         <div className="flex-1" />
 
+        {/* 공유 */}
+        <div className="relative">
+          <button
+            onClick={() => setShowShare((v) => !v)}
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded border border-gray-600 text-gray-300 hover:bg-gray-800"
+            title="현재 페이지 링크 복사"
+          >
+            <Icon
+              d="M8.59 13.51l6.83 3.98M15.41 6.51L8.59 10.49M21 5a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM9 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 19a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"
+              className="w-3.5 h-3.5"
+            />
+            공유
+          </button>
+          {showShare && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setShowShare(false)} />
+              <div className="absolute top-full right-0 mt-1 z-20 w-72 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                  <p className="text-sm font-semibold text-white">공유</p>
+                  <button onClick={() => setShowShare(false)} className="text-gray-400 hover:text-gray-200">
+                    <Icon d="M6 18L18 6M6 6l12 12" className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="px-4 py-4 space-y-3">
+                  <div className="flex items-center gap-2 rounded-xl border border-gray-700 bg-gray-800 px-3 py-2.5">
+                    <Icon
+                      d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                      className="w-4 h-4 text-gray-400 shrink-0"
+                    />
+                    <span className="text-xs text-gray-400 truncate flex-1 select-all">{window.location.href}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(window.location.href).then(() => {
+                        setShowShare(false);
+                        showToast('링크가 클립보드에 복사되었습니다.');
+                      });
+                    }}
+                    className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 active:bg-blue-800 flex items-center justify-center gap-2"
+                  >
+                    <Icon
+                      d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2"
+                      className="w-4 h-4"
+                    />
+                    링크복사
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
         {/* 박스 선택 범위 저장 (추출 전에만) */}
         {!isExtracted && (
           <button
@@ -4409,6 +4463,7 @@ export default function MeshCropEditor({
             {toast.msg}
           </div>
         )}
+
         </div>
 
         {isVersionPanelOpen && !isExtracted && (

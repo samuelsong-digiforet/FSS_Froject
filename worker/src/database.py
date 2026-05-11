@@ -120,5 +120,24 @@ def update_texture_objects(asset_id: str, texture_objects: list):
         conn.close()
 
 
+def update_quality_metrics(asset_id: str, metrics: dict):
+    """PSNR, SSIM 등 품질 지표를 metadata에 저장"""
+    if not metrics:
+        return
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE assets
+                   SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+                       updated_at = NOW()
+                   WHERE id = %s""",
+                (json.dumps(metrics), asset_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class AssetDeletedException(Exception):
     pass

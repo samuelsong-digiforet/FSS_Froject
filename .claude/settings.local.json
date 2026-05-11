@@ -3,7 +3,25 @@
     "allow": [
       "Bash(node -e \"const bcrypt = require\\('bcrypt'\\); bcrypt.hash\\('12345678', 10\\).then\\(h => console.log\\(h\\)\\);\")",
       "Bash(claude update *)",
-      "Bash(claude *)"
+      "Bash(claude *)",
+      "Bash(git fetch *)",
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "PowerShell(docker exec fss-api ls /app/src/logs/)",
+      "PowerShell(docker compose restart api)",
+      "PowerShell(docker compose logs api --tail=20)",
+      "Bash(git check-ignore *)",
+      "PowerShell(docker compose ps)",
+      "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"SELECT id, name, type, status, created_at FROM assets ORDER BY created_at DESC LIMIT 20;\")",
+      "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"SELECT name, type FROM assets ORDER BY created_at DESC;\")",
+      "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"UPDATE assets SET type = 'mesh' WHERE name ILIKE '%glb%'; SELECT name, type FROM assets ORDER BY created_at DESC;\")",
+      "Bash(Get-ChildItem -Path \"d:\\\\AF_SSML\\\\Project\\\\FSS\\\\worker\\\\src\" -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"SELECT name, type, status, created_at FROM assets ORDER BY created_at DESC LIMIT 5;\")",
+      "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"SELECT name, type, status, preview_object, output_object FROM assets WHERE status = 'awaiting_crop';\")",
+      "PowerShell(docker compose logs worker --tail=50)",
+      "PowerShell(nvidia-smi)",
+      "Bash(npx tsc *)"
     ]
   }
 }

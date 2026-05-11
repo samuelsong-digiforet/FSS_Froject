@@ -1,7 +1,14 @@
 import api from './auth';
 
-export type AssetType   = 'point_cloud' | 'nerf' | 'gaussian' | 'mesh';
-export type AssetStatus = 'pending' | 'processing' | 'preview_ready' | 'awaiting_crop' | 'done' | 'failed' | 'gpu_required';
+export type AssetType = 'point_cloud' | 'nerf' | 'gaussian' | 'mesh';
+export type AssetStatus =
+  | 'pending'
+  | 'processing'
+  | 'preview_ready'
+  | 'awaiting_crop'
+  | 'done'
+  | 'failed'
+  | 'gpu_required';
 export type AssetUploadMode = 'direct' | 'convert';
 export type MeshInteropDownloadFormat = 'glb' | 'obj' | 'stl' | 'ply' | 'all';
 
@@ -23,6 +30,9 @@ export interface AssetMetadata extends Record<string, unknown> {
   obbParams?: AssetObb;
   obbVersions?: AssetObbVersion[];
   representativeSceneObject?: string;
+  psnr?: number;
+  ssim?: number;
+  volumeRenderingAccuracy?: number;
 }
 
 export interface Asset {
@@ -34,8 +44,8 @@ export interface Asset {
   status: AssetStatus;
   progress: number;
   sourceObject: string;
-  previewObject?: string;   // 1단계 fly PLY 경로
-  outputObject?: string;    // 2단계 풀 변환 결과 경로
+  previewObject?: string; // 1단계 fly PLY 경로
+  outputObject?: string; // 2단계 풀 변환 결과 경로
   errorMessage?: string;
   metadata?: AssetMetadata;
   userId: string;
@@ -72,41 +82,53 @@ export const ASSET_TYPE_FORMATS: Record<AssetType, { exts: string[]; desc: strin
 export const assetsApi = {
   getAll: (params?: { categoryId?: number }) => api.get<Asset[]>('/assets', { params }),
   getOne: (id: string) => api.get<Asset>(`/assets/${id}`),
-  create: (data: { name: string; description?: string; type: AssetType; sourceObject: string; categoryId?: number; outputProfile?: string; uploadMode?: AssetUploadMode }) =>
-    api.post<Asset>('/assets', data),
-  update: (id: string, data: {
-    name?: string;
+  create: (data: {
+    name: string;
     description?: string;
-    previewObject?: string;
-    outputObject?: string;
-    categoryId?: number | null;
-    approved?: boolean;
-    calibrationScale?: number;
-    calibrationReferenceLength?: number;
-    calibrationMeasuredLength?: number;
-    representativeSceneObject?: string | null;
-  }) =>
-    api.patch<Asset>(`/assets/${id}`, data),
+    type: AssetType;
+    sourceObject: string;
+    categoryId?: number;
+    outputProfile?: string;
+    uploadMode?: AssetUploadMode;
+  }) => api.post<Asset>('/assets', data),
+  update: (
+    id: string,
+    data: {
+      name?: string;
+      description?: string;
+      previewObject?: string;
+      outputObject?: string;
+      categoryId?: number | null;
+      approved?: boolean;
+      calibrationScale?: number;
+      calibrationReferenceLength?: number;
+      calibrationMeasuredLength?: number;
+      representativeSceneObject?: string | null;
+    },
+  ) => api.patch<Asset>(`/assets/${id}`, data),
   remove: (id: string) => api.delete(`/assets/${id}`),
   getVersions: (id: string) => api.get<AssetObbVersion[]>(`/assets/${id}/versions`),
   createVersion: (id: string, data: AssetObb & { description?: string; sceneObject?: string }) =>
     api.post<Asset>(`/assets/${id}/versions`, data),
   updateVersion: (id: string, versionId: string, data: AssetObb & { description?: string }) =>
     api.patch<Asset>(`/assets/${id}/versions/${versionId}`, data),
-  removeVersion: (id: string, versionId: string) =>
-    api.delete<Asset>(`/assets/${id}/versions/${versionId}`),
-  resumeStage2: (id: string, params: { obbCenter?: number[]; obbRotation?: number[]; obbScale?: number[]; previewCenter?: number[]; previewBounds?: number[] }) =>
-    api.post<Asset>(`/assets/${id}/resume`, params),
+  removeVersion: (id: string, versionId: string) => api.delete<Asset>(`/assets/${id}/versions/${versionId}`),
+  resumeStage2: (
+    id: string,
+    params: {
+      obbCenter?: number[];
+      obbRotation?: number[];
+      obbScale?: number[];
+      previewCenter?: number[];
+      previewBounds?: number[];
+    },
+  ) => api.post<Asset>(`/assets/${id}/resume`, params),
   downloadMeshArtifact: (id: string, format: MeshInteropDownloadFormat) =>
     api.get<Blob>(`/assets/${id}/download`, { params: { format }, responseType: 'blob' }),
-  rename: (id: string, name: string) =>
-    api.patch<Asset>(`/assets/${id}/rename`, { name }),
-  toggleApproval: (id: string) =>
-    api.patch<Asset>(`/assets/${id}/approval`),
-getStreamUrl: (objectName: string): string =>
-    `/api/uploads/stream/${objectName}`,
-  getNerfFrames: (id: string) =>
-    api.get<{ count: number; paths: string[] }>(`/assets/${id}/nerf-frames`),
+  rename: (id: string, name: string) => api.patch<Asset>(`/assets/${id}/rename`, { name }),
+  toggleApproval: (id: string) => api.patch<Asset>(`/assets/${id}/approval`),
+  getStreamUrl: (objectName: string): string => `/api/uploads/stream/${objectName}`,
+  getNerfFrames: (id: string) => api.get<{ count: number; paths: string[] }>(`/assets/${id}/nerf-frames`),
   getNerfFrameUrl: (id: string, framePath: string): string =>
     `/api/assets/${id}/nerf-frame?path=${encodeURIComponent(framePath)}`,
   upload: (file: File, onProgress?: (pct: number) => void) => {
@@ -127,27 +149,27 @@ getStreamUrl: (objectName: string): string =>
 
 export const ASSET_TYPE_LABELS: Record<AssetType, string> = {
   point_cloud: '포인트 클라우드',
-  nerf:        'NeRF',
-  gaussian:    '가우시안 스플래팅',
-  mesh:        '메시',
+  nerf: 'NeRF',
+  gaussian: '3D 가우시안 스플래팅',
+  mesh: '메시',
 };
 
 export const ASSET_STATUS_LABELS: Record<AssetStatus, string> = {
-  pending:        '대기',
-  processing:     '처리 중',
-  preview_ready:  '미리보기 준비',
-  awaiting_crop:  '영역 선택 대기',
-  done:           '완료',
-  failed:         '실패',
-  gpu_required:   'GPU 필요',
+  pending: '대기',
+  processing: '처리 중',
+  preview_ready: '미리보기 준비',
+  awaiting_crop: '영역 선택 대기',
+  done: '완료',
+  failed: '실패',
+  gpu_required: 'GPU 필요',
 };
 
 export const ASSET_STATUS_COLORS: Record<AssetStatus, string> = {
-  pending:        'bg-gray-100 text-gray-600',
-  processing:     'bg-blue-100 text-blue-600',
-  preview_ready:  'bg-yellow-100 text-yellow-700',
-  awaiting_crop:  'bg-orange-100 text-orange-700',
-  done:           'bg-green-100 text-green-700',
-  failed:         'bg-red-100 text-red-600',
-  gpu_required:   'bg-purple-100 text-purple-700',
+  pending: 'bg-gray-100 text-gray-600',
+  processing: 'bg-blue-100 text-blue-600',
+  preview_ready: 'bg-yellow-100 text-yellow-700',
+  awaiting_crop: 'bg-orange-100 text-orange-700',
+  done: 'bg-green-100 text-green-700',
+  failed: 'bg-red-100 text-red-600',
+  gpu_required: 'bg-purple-100 text-purple-700',
 };

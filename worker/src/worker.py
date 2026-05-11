@@ -6,7 +6,7 @@ import time
 import redis
 from storage import download_object, upload_object
 from converter import preprocess_to_fly, convert_from_processed, convert_asset
-from database import update_asset_status, update_asset_progress, update_preview_object, update_awaiting_crop, is_asset_deleted, update_texture_objects, AssetDeletedException
+from database import update_asset_status, update_asset_progress, update_preview_object, update_awaiting_crop, is_asset_deleted, update_texture_objects, update_quality_metrics, AssetDeletedException
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -24,6 +24,13 @@ MIME_MAP = {
     ".zip":   "application/zip",
 }
 
+# GPU 학습이 필요한 타입
+GPU_INTENSIVE_TYPES = {"gaussian", "nerf", "mesh"}
+
+# 최소 GPU 요구 사양
+MIN_COMPUTE_CAPABILITY = (7, 0)   # Volta 이상 (RTX 20xx, V100, ...)
+MIN_VRAM_GB = 6.0
+
 
 def get_redis():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
@@ -32,6 +39,72 @@ def get_redis():
 class AwaitingCropException(Exception):
     """Stage 1 완료 후 사용자 영역 선택을 기다리는 경우 발생"""
     pass
+
+
+class GpuRequiredException(Exception):
+    """GPU 사양 미달로 처리 불가능한 경우 발생"""
+    pass
+
+
+def check_gpu_requirements(asset_type: str) -> tuple:
+    """GPU 사양 확인. (ok: bool, message: str) 반환"""
+    if asset_type not in GPU_INTENSIVE_TYPES:
+        return True, ""
+
+    try:
+        import torch
+    except ImportError:
+        return False, (
+            "PyTorch가 설치되어 있지 않습니다.\n"
+            "Worker 환경을 확인해 주세요."
+        )
+
+    if not torch.cuda.is_available():
+        return False, (
+            "NVIDIA GPU를 감지할 수 없습니다.\n\n"
+            "[최소 요구 사양]\n"
+            f"• NVIDIA GPU (Compute Capability {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상)\n"
+            f"• VRAM {MIN_VRAM_GB:.0f}GB 이상\n"
+            "• CUDA 11.8 이상"
+        )
+
+    try:
+        props = torch.cuda.get_device_properties(0)
+        cc = (props.major, props.minor)
+        vram_gb = props.total_memory / (1024 ** 3)
+        gpu_name = props.name
+
+        issues = []
+        if cc < MIN_COMPUTE_CAPABILITY:
+            issues.append(
+                f"• 연산 능력(Compute Capability): {cc[0]}.{cc[1]} "
+                f"(최소 {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상 필요)"
+            )
+        if vram_gb < MIN_VRAM_GB:
+            issues.append(f"• VRAM: {vram_gb:.1f}GB (최소 {MIN_VRAM_GB:.0f}GB 이상 필요)")
+
+        if issues:
+            msg = (
+                f"현재 GPU가 이 변환 작업을 지원하지 않습니다.\n\n"
+                f"[현재 GPU 사양]\n"
+                f"• 모델: {gpu_name}\n"
+                f"• 연산 능력(Compute Capability): {cc[0]}.{cc[1]}\n"
+                f"• VRAM: {vram_gb:.1f}GB\n\n"
+                f"[미달 항목]\n" + "\n".join(issues) + "\n\n"
+                f"[최소 요구 사양]\n"
+                f"• NVIDIA GPU (Compute Capability {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상)\n"
+                f"• VRAM {MIN_VRAM_GB:.0f}GB 이상\n"
+                "• CUDA 11.8 이상"
+            )
+            return False, msg
+
+        return True, ""
+
+    except Exception as e:
+        return False, (
+            f"GPU 정보 확인 중 오류가 발생했습니다: {e}\n"
+            "NVIDIA GPU 및 CUDA 환경을 확인해 주세요."
+        )
 
 
 PLY_SCALAR_FORMATS = {
@@ -192,10 +265,12 @@ def process_job(job_id: str, data: dict) -> str:
 
     with tempfile.TemporaryDirectory() as tmpdir:
 
+        metrics: dict = {}
+
         # ── Stage2 전용 job (colmapObject 다운로드 → 풀 트레이닝) ─
         if data.get("stage") == "stage2":
             on_progress(55)
-            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check)
+            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics)
         else:
             # ── 원본 파일 다운로드 ──────────────────────────────────
             ext = os.path.splitext(source_obj)[-1].lower()
@@ -206,8 +281,12 @@ def process_job(job_id: str, data: dict) -> str:
 
             # ── 2단계 파이프라인 (gaussian/nerf/mesh/point_cloud + ZIP/영상) ─
             if asset_type in TWO_STAGE_TYPES and ext in TWO_STAGE_EXTS:
+                gpu_ok, gpu_msg = check_gpu_requirements(asset_type)
+                if not gpu_ok:
+                    update_asset_status(asset_id, "gpu_required", error_message=gpu_msg)
+                    raise GpuRequiredException(gpu_msg)
                 output_object = _run_two_stage(
-                    asset_id, asset_type, input_path, tmpdir, on_progress, stop_check=stop_check,
+                    asset_id, asset_type, input_path, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics,
                 )
             else:
                 # ── 단일 단계 (직접 파일 변환) ─────────────────────
@@ -223,11 +302,14 @@ def process_job(job_id: str, data: dict) -> str:
                         update_texture_objects(asset_id, tex)
 
     update_asset_status(asset_id, "done", output_object=output_object)
+    if metrics:
+        update_quality_metrics(asset_id, metrics)
+        print(f"[Worker] Job {job_id} quality metrics saved: {metrics}")
     print(f"[Worker] Job {job_id} done — output: {output_object}")
     return output_object
 
 
-def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, stop_check=None) -> str:
+def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
     """
     1단계: COLMAP + 빠른 splatfacto → fly PLY → previewObject
     2단계: COLMAP 결과 재사용 → 풀 트레이닝 → outputObject
@@ -269,7 +351,7 @@ def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str,
     if processed_dir and os.path.isdir(processed_dir):
         print(f"[Worker][Stage2] COLMAP 결과 재사용 → 풀 트레이닝")
         output_dir  = os.path.join(tmpdir, "output")
-        output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, stop_check=stop_check)
+        output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, stop_check=stop_check, metrics_out=metrics_out)
     else:
         raise RuntimeError(
             f"COLMAP 전처리 실패로 '{asset_type}' 변환을 완료할 수 없습니다. "
@@ -279,7 +361,7 @@ def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str,
     return _upload_output(asset_id, output_path)
 
 
-def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None) -> str:
+def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
     """사용자 영역 선택 후 Stage 2 재개 (COLMAP tarball 다운로드 → 풀 트레이닝)"""
     import tarfile as tarfile_mod
 
@@ -310,7 +392,7 @@ def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_prog
     print(f"[Worker][Stage2] 풀 트레이닝 시작 (processed_dir={processed_dir}, obb={obb_params})")
 
     output_dir  = os.path.join(tmpdir, "output")
-    output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, obb_params=obb_params, stop_check=stop_check)
+    output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, obb_params=obb_params, stop_check=stop_check, metrics_out=metrics_out)
 
     output_object = _upload_output(asset_id, output_path)
 
@@ -324,7 +406,6 @@ def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_prog
             update_texture_objects(asset_id, tex)
 
     return output_object
-
 
 
 def _run_regenerate_preview(asset_id: str, data: dict, tmpdir: str):
@@ -533,6 +614,12 @@ def main():
                 r.lrem(active_key, 1, job_id)
                 r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "awaiting_crop"}), "finishedOn": int(time.time() * 1000)})
                 continue
+            except GpuRequiredException as gpu_err:
+                # GPU 사양 미달: gpu_required 상태로 종료 (실패 아님)
+                print(f"[Worker] GPU 요구사항 미달 — job {job_id} 중단")
+                r.lrem(active_key, 1, job_id)
+                r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "gpu_required"}), "finishedOn": int(time.time() * 1000)})
+                continue
             except Exception as job_err:
                 import traceback
                 asset_id = data.get("assetId")
@@ -586,9 +673,11 @@ def process_job(job_id: str, data: dict) -> str:
     update_asset_status(asset_id, "processing", progress=0)
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        metrics: dict = {}
+
         if data.get("stage") == "stage2":
             on_progress(55)
-            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check)
+            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics)
         else:
             ext = os.path.splitext(source_obj)[-1].lower()
             input_path = os.path.join(tmpdir, f"input{ext}")
@@ -605,6 +694,7 @@ def process_job(job_id: str, data: dict) -> str:
                     on_progress,
                     output_profile=output_profile,
                     stop_check=stop_check,
+                    metrics_out=metrics,
                 )
             else:
                 output_dir = os.path.join(tmpdir, "output")
@@ -624,11 +714,14 @@ def process_job(job_id: str, data: dict) -> str:
                         update_texture_objects(asset_id, tex)
 
     update_asset_status(asset_id, "done", output_object=output_object)
+    if metrics:
+        update_quality_metrics(asset_id, metrics)
+        print(f"[Worker] Job {job_id} quality metrics saved: {metrics}")
     print(f"[Worker] Job {job_id} done -- output: {output_object}")
     return output_object
 
 
-def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, output_profile: str | None = None, stop_check=None) -> str:
+def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, output_profile: str | None = None, stop_check=None, metrics_out: dict | None = None) -> str:
     print("[Worker][Stage1] starting preprocess + preview generation")
     fly_path, processed_dir = preprocess_to_fly(input_path, tmpdir, on_progress, stop_check=stop_check)
 
@@ -666,6 +759,7 @@ def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str,
             on_progress,
             output_profile=output_profile,
             stop_check=stop_check,
+            metrics_out=metrics_out,
         )
     else:
         raise RuntimeError(
@@ -675,7 +769,7 @@ def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str,
     return _upload_output(asset_id, output_path)
 
 
-def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None) -> str:
+def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
     import tarfile as tarfile_mod
 
     colmap_object = data.get("colmapObject")
@@ -709,6 +803,7 @@ def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_prog
         output_profile=output_profile,
         obb_params=obb_params,
         stop_check=stop_check,
+        metrics_out=metrics_out,
     )
 
     output_object = _upload_output(asset_id, output_path)

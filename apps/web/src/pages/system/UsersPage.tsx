@@ -70,21 +70,65 @@ function Alert({ message, onClose }: { message: string; onClose: () => void }) {
   );
 }
 
-function Field({ label, required, children }: {
-  label: string; required?: boolean; children: React.ReactNode;
+const PHONE_REGEX = /^01[016789]-\d{3,4}-\d{4}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USERNAME_REGEX = /^[a-zA-Z0-9_]{4,20}$/;
+
+const formatPhone = (value: string) => {
+  const digits = value.replace(/\D/g, '').slice(0, 11);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 7) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7)}`;
+};
+
+type FormErrors = Partial<Record<'username' | 'password' | 'fullName' | 'email' | 'department' | 'position' | 'phone', string>>;
+
+function validateCreate(form: CreateUserPayload): FormErrors {
+  const e: FormErrors = {};
+  if (!form.username) e.username = '아이디를 입력하세요.';
+  else if (!USERNAME_REGEX.test(form.username)) e.username = '4~20자 영문·숫자·_ 만 허용됩니다.';
+  if (!form.password) e.password = '비밀번호를 입력하세요.';
+  else if (form.password.length < 8) e.password = '8자 이상 입력하세요.';
+  if (!form.department) e.department = '부서를 입력하세요.';
+  if (!form.position) e.position = '직급을 입력하세요.';
+  if (!form.fullName) e.fullName = '이름을 입력하세요.';
+  if (!form.phone) e.phone = '연락처를 입력하세요.';
+  else if (!PHONE_REGEX.test(form.phone)) e.phone = '형식이 올바르지 않습니다.';
+  if (!form.email) e.email = '이메일을 입력하세요.';
+  else if (!EMAIL_REGEX.test(form.email)) e.email = '올바른 이메일 형식이 아닙니다.';
+  return e;
+}
+
+function validateUpdate(form: CreateUserPayload): FormErrors {
+  const e: FormErrors = {};
+  if (!form.department) e.department = '부서를 입력하세요.';
+  if (!form.position) e.position = '직급을 입력하세요.';
+  if (!form.fullName) e.fullName = '이름을 입력하세요.';
+  if (!form.phone) e.phone = '연락처를 입력하세요.';
+  else if (!PHONE_REGEX.test(form.phone)) e.phone = '형식이 올바르지 않습니다.';
+  if (!form.email) e.email = '이메일을 입력하세요.';
+  else if (!EMAIL_REGEX.test(form.email)) e.email = '올바른 이메일 형식이 아닙니다.';
+  return e;
+}
+
+function Field({ label, required, error, className, children }: {
+  label: string; required?: boolean; error?: string; className?: string; children: React.ReactNode;
 }) {
   return (
-    <div>
-      <label className="text-sm font-medium text-gray-700 mb-1 block">
+    <div className={className}>
+      <label className="text-xs font-medium text-gray-700 mb-0.5 block">
         {label} {required && <span className="text-red-500">*</span>}
       </label>
       {children}
+      <p className={`text-xs mt-0.5 h-4 leading-4 truncate ${error ? 'text-red-500' : 'invisible'}`}>
+        {error ?? ' '}
+      </p>
     </div>
   );
 }
 
-const inputCls = `w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm
-  focus:outline-none focus:border-blue-500`;
+const inputCls = (error?: string) =>
+  `w-full border ${error ? 'border-red-400 focus:border-red-500' : 'border-gray-300 focus:border-blue-500'} rounded-lg px-4 py-2.5 text-sm focus:outline-none`;
 
 function Modal({ title, onClose, children }: {
   title: string; onClose: () => void; children: React.ReactNode;
@@ -151,7 +195,7 @@ export default function UsersPage() {
     department: '', position: '', phone: '', isApproved: false,
   });
   const [showPw, setShowPw] = useState(false);
-  const [formError, setFormError] = useState('');
+  const [formErrors, setFormErrors] = useState<FormErrors>({});
 
   const [pwForm, setPwForm] = useState({ current: '', next: '', confirm: '' });
   const [showPwCurrent, setShowPwCurrent] = useState(false);
@@ -189,23 +233,26 @@ export default function UsersPage() {
   const openCreate = () => {
     setForm({ username: '', password: '', fullName: '', email: '',
       department: '', position: '', phone: '', isApproved: false });
-    setFormError('');
+    setFormErrors({});
     setShowPw(false);
     setModal('create');
   };
 
   const handleCreate = async () => {
-    if (!form.username || !form.password || !form.fullName || !form.email) {
-      setFormError('필수 항목을 입력하세요.');
-      return;
-    }
+    const errors = validateCreate(form);
+    if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
     try {
       await usersApi.create(form);
       setModal('none');
       fetchUsers();
       setAlert('생성완료');
-    } catch {
-      setAlert('생성에 실패하였습니다.\n관리자에게 문의주세요.');
+    } catch (err: any) {
+      const msg = err.response?.data?.message ?? '';
+      if (msg.includes('username') || msg.includes('already') || msg.includes('중복')) {
+        setFormErrors({ username: '이미 사용 중인 아이디입니다.' });
+      } else {
+        setAlert('생성에 실패하였습니다.\n관리자에게 문의주세요.');
+      }
     }
   };
 
@@ -226,12 +273,14 @@ export default function UsersPage() {
       phone: selected.phone ?? '',
       isApproved: selected.isApproved,
     });
-    setFormError('');
+    setFormErrors({});
     setModal('edit');
   };
 
   const handleUpdate = async () => {
     if (!selected) return;
+    const errors = validateUpdate(form);
+    if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
     const payload: UpdateUserPayload = {
       fullName: form.fullName,
       email: form.email,
@@ -399,52 +448,58 @@ export default function UsersPage() {
       {/* ── 생성 팝업 ── */}
       {modal === 'create' && (
         <Modal title="회원 생성" onClose={() => setModal('none')}>
-          <div className="px-6 py-5 space-y-4">
-            <Field label="승인 여부" required>
+          <div className="px-6 py-4 grid grid-cols-2 gap-x-4">
+            <Field label="승인 여부" required className="col-span-2">
               <ApprovalToggle
                 value={form.isApproved}
                 onChange={perm.approve ? v => setForm(f => ({ ...f, isApproved: v })) : () => {}}
                 disabled={!perm.approve}
               />
             </Field>
-            <Field label="아이디" required>
-              <input value={form.username} onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
-                placeholder="아이디를 입력하세요" className={inputCls} />
+            <Field label="아이디" required error={formErrors.username}>
+              <input value={form.username}
+                onChange={e => { setForm(f => ({ ...f, username: e.target.value })); setFormErrors(fe => ({ ...fe, username: undefined })); }}
+                placeholder="4~20자, 영문/숫자/_"
+                className={inputCls(formErrors.username)} />
             </Field>
-            <Field label="비밀번호" required>
+            <Field label="비밀번호" required error={formErrors.password}>
               <div className="relative">
                 <input type={showPw ? 'text' : 'password'} value={form.password}
-                  onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                  placeholder="비밀번호를 입력하세요" className={inputCls + ' pr-10'} />
+                  onChange={e => { setForm(f => ({ ...f, password: e.target.value })); setFormErrors(fe => ({ ...fe, password: undefined })); }}
+                  placeholder="8자 이상" className={inputCls(formErrors.password) + ' pr-10'} />
                 <button type="button" onClick={() => setShowPw(v => !v)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
                   <EyeIcon show={showPw} />
                 </button>
               </div>
             </Field>
-            <Field label="부서" required>
-              <input value={form.department} onChange={e => setForm(f => ({ ...f, department: e.target.value }))}
-                placeholder="부서를 입력하세요" className={inputCls} />
+            <Field label="부서" required error={formErrors.department}>
+              <input value={form.department}
+                onChange={e => { setForm(f => ({ ...f, department: e.target.value })); setFormErrors(fe => ({ ...fe, department: undefined })); }}
+                placeholder="부서를 입력하세요" className={inputCls(formErrors.department)} />
             </Field>
-            <Field label="직급" required>
-              <input value={form.position} onChange={e => setForm(f => ({ ...f, position: e.target.value }))}
-                placeholder="직급을 입력하세요" className={inputCls} />
+            <Field label="직급" required error={formErrors.position}>
+              <input value={form.position}
+                onChange={e => { setForm(f => ({ ...f, position: e.target.value })); setFormErrors(fe => ({ ...fe, position: undefined })); }}
+                placeholder="직급을 입력하세요" className={inputCls(formErrors.position)} />
             </Field>
-            <Field label="이름" required>
-              <input value={form.fullName} onChange={e => setForm(f => ({ ...f, fullName: e.target.value }))}
-                placeholder="이름을 입력하세요" className={inputCls} />
+            <Field label="이름" required error={formErrors.fullName}>
+              <input value={form.fullName}
+                onChange={e => { setForm(f => ({ ...f, fullName: e.target.value })); setFormErrors(fe => ({ ...fe, fullName: undefined })); }}
+                placeholder="이름을 입력하세요" className={inputCls(formErrors.fullName)} />
             </Field>
-            <Field label="연락처" required>
-              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                placeholder="연락처를 입력하세요" className={inputCls} />
+            <Field label="연락처" required error={formErrors.phone}>
+              <input value={form.phone}
+                onChange={e => { const v = formatPhone(e.target.value); setForm(f => ({ ...f, phone: v })); setFormErrors(fe => ({ ...fe, phone: undefined })); }}
+                placeholder="010-1234-5678" className={inputCls(formErrors.phone)} maxLength={13} />
             </Field>
-            <Field label="이메일" required>
-              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                placeholder="이메일을 입력하세요" className={inputCls} />
+            <Field label="이메일" required error={formErrors.email} className="col-span-2">
+              <input value={form.email}
+                onChange={e => { setForm(f => ({ ...f, email: e.target.value })); setFormErrors(fe => ({ ...fe, email: undefined })); }}
+                placeholder="example@domain.com" className={inputCls(formErrors.email)} />
             </Field>
-            {formError && <p className="text-red-500 text-xs">{formError}</p>}
           </div>
-          <div className="flex justify-end gap-2 px-6 py-4 border-t bg-gray-50 rounded-b-lg sticky bottom-0">
+          <div className="flex justify-end gap-2 px-6 py-3 border-t bg-gray-50 rounded-b-lg">
             <button onClick={() => setModal('none')}
               className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-100">취소</button>
             <button onClick={handleCreate}
@@ -507,8 +562,8 @@ export default function UsersPage() {
       {/* ── 수정 팝업 ── */}
       {modal === 'edit' && selected && (
         <Modal title="회원 수정" onClose={() => setModal('detail')}>
-          <div className="px-6 py-5 space-y-4">
-            <Field label="승인 여부" required>
+          <div className="px-6 py-4 grid grid-cols-2 gap-x-4">
+            <Field label="승인 여부" required className="col-span-2">
               <ApprovalToggle
                 value={form.isApproved}
                 onChange={v => setForm(f => ({ ...f, isApproved: v }))}
@@ -517,7 +572,7 @@ export default function UsersPage() {
             </Field>
             <Field label="아이디" required>
               <input value={form.username} disabled
-                className={inputCls + ' bg-gray-100 cursor-not-allowed'} />
+                className={inputCls() + ' bg-gray-100 cursor-not-allowed'} />
             </Field>
             <Field label="비밀번호" required>
               <button
@@ -527,29 +582,33 @@ export default function UsersPage() {
                 비밀번호 변경
               </button>
             </Field>
-            <Field label="부서" required>
-              <input value={form.department} onChange={e => setForm(f => ({ ...f, department: e.target.value }))}
-                placeholder="부서를 입력하세요" className={inputCls} />
+            <Field label="부서" required error={formErrors.department}>
+              <input value={form.department}
+                onChange={e => { setForm(f => ({ ...f, department: e.target.value })); setFormErrors(fe => ({ ...fe, department: undefined })); }}
+                placeholder="부서를 입력하세요" className={inputCls(formErrors.department)} />
             </Field>
-            <Field label="직급" required>
-              <input value={form.position} onChange={e => setForm(f => ({ ...f, position: e.target.value }))}
-                placeholder="직급을 입력하세요" className={inputCls} />
+            <Field label="직급" required error={formErrors.position}>
+              <input value={form.position}
+                onChange={e => { setForm(f => ({ ...f, position: e.target.value })); setFormErrors(fe => ({ ...fe, position: undefined })); }}
+                placeholder="직급을 입력하세요" className={inputCls(formErrors.position)} />
             </Field>
-            <Field label="이름" required>
-              <input value={form.fullName} onChange={e => setForm(f => ({ ...f, fullName: e.target.value }))}
-                placeholder="이름을 입력하세요" className={inputCls} />
+            <Field label="이름" required error={formErrors.fullName}>
+              <input value={form.fullName}
+                onChange={e => { setForm(f => ({ ...f, fullName: e.target.value })); setFormErrors(fe => ({ ...fe, fullName: undefined })); }}
+                placeholder="이름을 입력하세요" className={inputCls(formErrors.fullName)} />
             </Field>
-            <Field label="연락처" required>
-              <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
-                placeholder="연락처를 입력하세요" className={inputCls} />
+            <Field label="연락처" required error={formErrors.phone}>
+              <input value={form.phone}
+                onChange={e => { const v = formatPhone(e.target.value); setForm(f => ({ ...f, phone: v })); setFormErrors(fe => ({ ...fe, phone: undefined })); }}
+                placeholder="010-1234-5678" className={inputCls(formErrors.phone)} maxLength={13} />
             </Field>
-            <Field label="이메일" required>
-              <input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
-                placeholder="이메일을 입력하세요" className={inputCls} />
+            <Field label="이메일" required error={formErrors.email} className="col-span-2">
+              <input value={form.email}
+                onChange={e => { setForm(f => ({ ...f, email: e.target.value })); setFormErrors(fe => ({ ...fe, email: undefined })); }}
+                placeholder="example@domain.com" className={inputCls(formErrors.email)} />
             </Field>
-            {formError && <p className="text-red-500 text-xs">{formError}</p>}
           </div>
-          <div className="flex justify-end gap-2 px-6 py-4 border-t bg-gray-50 rounded-b-lg sticky bottom-0">
+          <div className="flex justify-end gap-2 px-6 py-3 border-t bg-gray-50 rounded-b-lg">
             <button onClick={() => setModal('detail')}
               className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-100">취소</button>
             <button onClick={handleUpdate}

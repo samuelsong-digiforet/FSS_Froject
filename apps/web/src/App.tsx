@@ -34,6 +34,7 @@ export default function App() {
       />
       <Route path="/assets" element={wrap(<AssetsPage />)} />
       <Route path="/assets/categories" element={wrap(<AssetCategoriesPage />)} />
+      <Route path="/assets/:assetId" element={wrap(<AssetsPage />)} />
       <Route path="/system/users" element={wrap(<UsersPage />)} />
       <Route path="/system/permissions" element={wrap(<PermissionsPage />)} />
       <Route path="/system/permissions/:id" element={wrap(<PermissionDetailPage />)} />

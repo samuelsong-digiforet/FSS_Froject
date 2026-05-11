@@ -24,8 +24,8 @@ build/
 Thumbs.db
 
 # Logs
-logs/
 *.log
+/logs/
 npm-debug.log*
 
 # Docker volumes (로컬 데이터)

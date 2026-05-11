@@ -127,10 +127,11 @@ def preprocess_to_fly(input_path: str, work_dir: str, progress_callback=None, st
     return None, processed_dir
 
 
-def convert_from_processed(asset_type: str, processed_dir: str, output_dir: str, progress_callback=None, output_profile: str | None = None, obb_params: dict | None = None, stop_check=None) -> str:
+def convert_from_processed(asset_type: str, processed_dir: str, output_dir: str, progress_callback=None, output_profile: str | None = None, obb_params: dict | None = None, stop_check=None, metrics_out: dict | None = None) -> str:
     """
     2단계: COLMAP 결과(processed_dir) → 풀 트레이닝 or 포인트클라우드/메시 추출
     obb_params: {"center": [x,y,z], "rotation": [x,y,z], "scale": [x,y,z]} — mesh/nerf 영역 지정용
+    metrics_out: 채워질 품질 지표 dict (psnr, ssim) — gaussian/nerf 타입에서만 수집됨
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -139,9 +140,9 @@ def convert_from_processed(asset_type: str, processed_dir: str, output_dir: str,
             progress_callback(55 + min(pct, 44))  # 2단계는 55~99%
 
     if asset_type == "gaussian":
-        return _full_gaussian(processed_dir, output_dir, report, obb_params=obb_params, stop_check=stop_check)
+        return _full_gaussian(processed_dir, output_dir, report, obb_params=obb_params, stop_check=stop_check, metrics_out=metrics_out)
     elif asset_type == "nerf":
-        return _full_nerf(processed_dir, output_dir, report, obb_params=obb_params, stop_check=stop_check)
+        return _full_nerf(processed_dir, output_dir, report, obb_params=obb_params, stop_check=stop_check, metrics_out=metrics_out)
     elif asset_type == "point_cloud":
         return _point_cloud_from_colmap(processed_dir, output_dir, report, stop_check=stop_check)
     elif asset_type == "mesh":
@@ -178,7 +179,7 @@ def convert_asset(asset_type: str, input_path: str, output_dir: str, progress_ca
 # ══════════════════════════════════════════════════════════════════
 # 2단계 — Gaussian Splatting 풀 트레이닝
 # ══════════════════════════════════════════════════════════════════
-def _full_gaussian(processed_dir: str, output_dir: str, report, obb_params: dict | None = None, stop_check=None) -> str:
+def _full_gaussian(processed_dir: str, output_dir: str, report, obb_params: dict | None = None, stop_check=None, metrics_out: dict | None = None) -> str:
     train_dir  = os.path.join(output_dir, "train")
     export_dir = os.path.join(output_dir, "export")
     os.makedirs(export_dir, exist_ok=True)
@@ -193,7 +194,7 @@ def _full_gaussian(processed_dir: str, output_dir: str, report, obb_params: dict
             "--pipeline.model.cull-alpha-thresh", "0.005",
             "--viewer.quit-on-train-completion", "True",
         ],
-        report_range=(0, 80), report_fn=report, stop_check=stop_check,
+        report_range=(0, 80), report_fn=report, stop_check=stop_check, metrics_out=metrics_out,
     )
     report(80)
 
@@ -495,7 +496,7 @@ def _package_nerf_render_bundle(
 # ══════════════════════════════════════════════════════════════════
 # 2단계 — NeRF 풀 트레이닝
 # ══════════════════════════════════════════════════════════════════
-def _full_nerf(processed_dir: str, output_dir: str, report, obb_params: dict | None = None, stop_check=None) -> str:
+def _full_nerf(processed_dir: str, output_dir: str, report, obb_params: dict | None = None, stop_check=None, metrics_out: dict | None = None) -> str:
     """
     nerfacto 학습 후 interpolate 렌더링 → PNG 이미지 ZIP 출력.
     렌더링 프레임 수는 학습 이미지 수에 비례하여 자동 결정.
@@ -539,7 +540,7 @@ def _full_nerf(processed_dir: str, output_dir: str, report, obb_params: dict | N
             "--pipeline.model.implementation", "tcnn",
             "--viewer.quit-on-train-completion", "True",
         ],
-        report_range=(0, 80), report_fn=report, stop_check=stop_check,
+        report_range=(0, 80), report_fn=report, stop_check=stop_check, metrics_out=metrics_out,
     )
     report(80)
 
@@ -1638,7 +1639,11 @@ class CommandTimeoutError(RuntimeError):
     pass
 
 
-def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, stop_check=None):
+_PSNR_PATTERN = re.compile(r'psnr[:\s=]+([0-9]+\.?[0-9]*)', re.IGNORECASE)
+_SSIM_PATTERN = re.compile(r'ssim[:\s=]+([0-9]+\.?[0-9]*)', re.IGNORECASE)
+
+
+def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, stop_check=None, metrics_out: dict | None = None):
     import threading
     start_pct, end_pct = report_range
     print(f"[Converter] 실행: {' '.join(cmd)}")
@@ -1660,6 +1665,23 @@ def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, sto
                     ratio = cur / total
                     pct = int(start_pct + ratio * (end_pct - start_pct))
                     report_fn(pct)
+            if metrics_out is not None:
+                pm = _PSNR_PATTERN.search(line)
+                if pm:
+                    try:
+                        metrics_out["psnr"] = round(float(pm.group(1)), 4)
+                    except ValueError:
+                        pass
+                sm = _SSIM_PATTERN.search(line)
+                if sm:
+                    try:
+                        val = float(sm.group(1))
+                        # SSIM은 0~1 범위여야 함 (nerfstudio가 % 단위로 찍는 경우 보정)
+                        if val > 1.0:
+                            val = val / 100.0
+                        metrics_out["ssim"] = round(val, 6)
+                    except ValueError:
+                        pass
 
     def _monitor():
         while proc.poll() is None:
