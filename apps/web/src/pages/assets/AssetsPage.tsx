@@ -9,6 +9,7 @@ import {
   type AssetStatus,
   type AssetType,
   type AssetUploadMode,
+  type GenerationQuality,
   ASSET_STATUS_COLORS,
   ASSET_STATUS_LABELS,
   ASSET_TYPE_FORMATS,
@@ -28,11 +29,11 @@ import {
 } from '@/api/assetProfiles';
 import { assetCategoriesApi, type AssetCategory } from '@/api/assetCategories';
 import { usePermission } from '@/hooks/usePermission';
-import type { ObbBox } from '@/components/ModelViewer';
 import { downloadMeshAssetFormat, getAssetDownloadName, supportsMeshFormatDownload } from '@/utils/meshDownloads';
 
 const ModelViewer = lazy(() => import('@/components/ModelViewer'));
 const MeshCropEditor = lazy(() => import('@/components/MeshCropEditor'));
+const AssemblyExploder = lazy(() => import('@/components/AssemblyExploder'));
 const NerfFrameCarousel = lazy(() => import('@/components/NerfFrameCarousel'));
 
 type ModalType = 'none' | 'create' | 'detail' | 'delete' | 'edit' | 'texture';
@@ -48,7 +49,8 @@ type ResumeOverride =
   | undefined;
 
 const ASSET_TYPES: AssetType[] = ['point_cloud', 'nerf', 'gaussian', 'mesh'];
-const POLLABLE: AssetStatus[] = ['pending', 'processing', 'preview_ready'];
+const REGENERATABLE_ASSET_TYPES: AssetType[] = ['gaussian', 'nerf', 'point_cloud', 'mesh'];
+const POLLABLE: AssetStatus[] = ['pending', 'processing'];
 const DEFAULT_STORED_OBB: StoredObb = {
   center: ['0', '0', '0'],
   rotation: ['0', '0', '0'],
@@ -69,6 +71,39 @@ const DIRECT_UPLOAD_FORMAT = {
 };
 const LOCAL_VERSION_KEY_PREFIX = 'obb_versions_';
 const MESH_DOWNLOAD_FORMATS: Exclude<MeshInteropDownloadFormat, 'all'>[] = ['glb', 'obj', 'stl', 'ply'];
+const GENERATION_QUALITY_PRESETS: GenerationQuality[] = ['fast', 'normal', 'precise'];
+const GENERATION_QUALITY_LABELS: Record<GenerationQuality, string> = {
+  fast: '빠름',
+  normal: '보통',
+  precise: '정밀',
+};
+const ASSET_TYPE_SUFFIX: Record<AssetType, string> = {
+  gaussian: 'to 3DGS',
+  nerf: 'to NeRF',
+  point_cloud: 'to P.C',
+  mesh: 'to mesh',
+};
+
+const GENERATION_QUALITY_HINTS: Record<GenerationQuality, string> = {
+  fast: '기본 빠른 생성값',
+  normal: '균형 생성값으로 재생성',
+  precise: '평가 제출용 정밀 생성값',
+};
+
+const QUALITY_SPEC_ROWS: Record<AssetType, { label: string; values: Record<GenerationQuality, string> }[]> = {
+  gaussian: [
+    { label: '학습 반복', values: { fast: '3,000', normal: '7,000', precise: '15,000' } },
+  ],
+  nerf: [
+    { label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } },
+  ],
+  point_cloud: [
+    { label: '최대 포인트', values: { fast: '300,000', normal: '700,000', precise: '1,000,000' } },
+  ],
+  mesh: [
+    { label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } },
+  ],
+};
 
 function getFileExtension(name: string): string {
   return name.split('.').pop()?.toLowerCase() ?? '';
@@ -130,7 +165,7 @@ function getBestPreviewObject(asset: Asset): string | undefined {
     const ft = getFileType(asset.outputObject);
     if (ft !== 'other' && ft !== 'zip') return asset.outputObject;
   }
-  if (asset.previewObject) return asset.previewObject;
+  if (asset.previewObject && !(asset.type === 'gaussian' && asset.status !== 'done')) return asset.previewObject;
   const ext = asset.sourceObject.split('.').pop()?.toLowerCase() ?? '';
   return ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'mp4', 'mov', 'avi', 'mkv'].includes(ext)
     ? asset.sourceObject
@@ -141,6 +176,30 @@ function getBestEditorObject(asset: Asset): string | undefined {
   return [asset.status === 'done' ? asset.outputObject : undefined, asset.previewObject]
     .filter((value): value is string => !!value)
     .find((value) => ['ply', 'glb', 'gltf'].includes(value.split('.').pop()?.toLowerCase() ?? ''));
+}
+
+function getBestAssemblyObject(asset: Asset): string | undefined {
+  return [
+    asset.metadata?.representativeSceneObject,
+    asset.status === 'done' ? asset.outputObject : undefined,
+    asset.previewObject,
+    asset.sourceObject,
+  ]
+    .filter((value): value is string => !!value)
+    .find((value) => ['glb', 'gltf'].includes(value.split('.').pop()?.toLowerCase() ?? ''));
+}
+
+function getGenerationQuality(asset: Asset | null | undefined): GenerationQuality {
+  const raw = asset?.metadata?.generationQuality;
+  return GENERATION_QUALITY_PRESETS.includes(raw as GenerationQuality) ? raw as GenerationQuality : 'fast';
+}
+
+function isDirectUploadAsset(asset: Asset | null | undefined): boolean {
+  if (!asset) return false;
+  if (asset.metadata?.uploadMode === 'direct') return true;
+  if (asset.metadata?.uploadMode === 'convert') return false;
+
+  return asset.status === 'done' && !!asset.outputObject && asset.outputObject === asset.sourceObject;
 }
 
 function getObjectDisplayName(objectKey?: string | null): string {
@@ -384,10 +443,11 @@ function Modal({
 }
 
 function StatusBadge({ status }: { status: AssetStatus }) {
-  const unavailable = status === 'awaiting_crop' && !window.crossOriginIsolated;
-  const label = unavailable ? '작업 불가' : ASSET_STATUS_LABELS[status];
-  const colorCls = unavailable ? 'bg-red-100 text-red-600' : ASSET_STATUS_COLORS[status];
-  return <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${colorCls}`}>{label}</span>;
+  return (
+    <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${ASSET_STATUS_COLORS[status]}`}>
+      {ASSET_STATUS_LABELS[status]}
+    </span>
+  );
 }
 
 export default function AssetsPage() {
@@ -432,6 +492,7 @@ export default function AssetsPage() {
   const [previewBounds, setPreviewBounds] = useState<[number, number, number]>([0, 0, 0]);
   const [cropLoading, setCropLoading] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [assemblyOpen, setAssemblyOpen] = useState(false);
   const [editorVersions, setEditorVersions] = useState<AssetObbVersion[]>([]);
   const [editForm, setEditForm] = useState<{
     name: string;
@@ -442,6 +503,8 @@ export default function AssetsPage() {
   const [editSaving, setEditSaving] = useState(false);
   const [meshConvertLoading, setMeshConvertLoading] = useState(false);
   const [meshDownloadLoading, setMeshDownloadLoading] = useState<MeshInteropDownloadFormat | null>(null);
+  const [qualityLoading, setQualityLoading] = useState<GenerationQuality | null>(null);
+  const [downloadDropdownOpen, setDownloadDropdownOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const applyStoredObb = useCallback((stored: StoredObb) => {
@@ -500,11 +563,15 @@ export default function AssetsPage() {
     if (!urlAssetId || !perm.isLoaded || !perm.view) return;
     void (async () => {
       try {
-        const { data } = await assetsApi.getOne(urlAssetId);
+        const { data } = await assetsApi.getOneByUuid(urlAssetId);
         const saved = loadObb(data.id);
         const fallback = getStoredObbFromAsset(data) ?? DEFAULT_STORED_OBB;
         applyStoredObb(saved ?? fallback);
         setEditorVersions(getInitialVersionsForAsset(data, toAssetObb(saved ?? fallback)));
+        const metaCenter = getPreviewCenterFromMetadata(data);
+        const metaBounds = getPreviewBoundsFromMetadata(data);
+        if (metaCenter) setPreviewCenter(metaCenter);
+        if (metaBounds) setPreviewBounds(metaBounds);
         setSelected(data);
         setModal('detail');
         if (data.type !== 'nerf') setEditorOpen(true);
@@ -638,6 +705,7 @@ export default function AssetsPage() {
     [JSON.stringify(selected?.metadata?.previewCenter)],
   );
   const editorObject = selected ? getBestEditorObject(selected) : undefined;
+  const assemblyObject = selected ? getBestAssemblyObject(selected) : undefined;
   const selectedInput = selected ? getAssetInputFormat(selected) : undefined;
   const selectedProfile = selected ? getAssetOutputProfile(selected) : undefined;
   const selectedCategoryName = getCategoryDisplayName(selected, categories);
@@ -646,60 +714,15 @@ export default function AssetsPage() {
   const selectedCalibrationScale = getCalibrationScaleFromMetadata(selected);
   const selectedCalibrationReferenceLength = getCalibrationReferenceLengthFromMetadata(selected);
   const canSelectMeshDownloadFormat = supportsMeshFormatDownload(selected);
-  const detailDownloadActions = selected ? (
-    canSelectMeshDownloadFormat ? (
-      <div className="pt-2 space-y-2">
-        <p className="text-xs text-blue-700">메쉬 파일만 형식을 선택해 다운로드할 수 있습니다.</p>
-        <div className="flex flex-wrap gap-2">
-          {MESH_DOWNLOAD_FORMATS.map((format) => (
-            <button
-              key={format}
-              type="button"
-              onClick={() => void handleDownloadMeshArtifact(selected, format)}
-              disabled={meshDownloadLoading !== null}
-              className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-40"
-            >
-              {meshDownloadLoading === format ? `${format.toUpperCase()} 다운로드 중...` : format.toUpperCase()}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={() => void handleDownloadMeshArtifact(selected, 'all')}
-            disabled={meshDownloadLoading !== null}
-            className="px-4 py-2 rounded-lg border border-green-600 text-green-700 text-sm hover:bg-green-50 disabled:opacity-40"
-          >
-            {meshDownloadLoading === 'all' ? '전체 다운로드 중...' : '전체'}
-          </button>
-          <a
-            href={assetsApi.getStreamUrl(selected.sourceObject)}
-            download
-            className="px-4 py-2 rounded-lg bg-gray-700 text-white text-sm hover:bg-gray-800"
-          >
-            원본 다운로드
-          </a>
-        </div>
-      </div>
-    ) : (
-      <div className="flex flex-wrap gap-2 pt-2">
-        {selected.outputObject && (
-          <a
-            href={assetsApi.getStreamUrl(selected.outputObject)}
-            download={getAssetDownloadName(selected.name, selected.outputObject)}
-            className="px-4 py-2 rounded-lg bg-green-600 text-white text-sm hover:bg-green-700"
-          >
-            변환 결과 다운로드
-          </a>
-        )}
-        <a
-          href={assetsApi.getStreamUrl(selected.sourceObject)}
-          download
-          className="px-4 py-2 rounded-lg bg-gray-700 text-white text-sm hover:bg-gray-800"
-        >
-          원본 다운로드
-        </a>
-      </div>
-    )
-  ) : null;
+  const selectedGenerationQuality = getGenerationQuality(selected);
+  const selectedSupportsGenerationQuality = !!selected && REGENERATABLE_ASSET_TYPES.includes(selected.type);
+  const selectedIsDirectUpload = isDirectUploadAsset(selected);
+  const canRegenerateQuality =
+    !!selected &&
+    selected.status === 'done' &&
+    !selectedIsDirectUpload &&
+    selectedSupportsGenerationQuality;
+  const showGenerationQualityPanel = selectedSupportsGenerationQuality;
 
   const openCreate = () => {
     setForm({
@@ -720,6 +743,7 @@ export default function AssetsPage() {
   };
 
   const openDetail = async (asset: Asset) => {
+    setAssemblyOpen(false);
     setPreviewCenter([0, 0, 0]);
     setPreviewBounds([0, 0, 0]);
     try {
@@ -728,6 +752,11 @@ export default function AssetsPage() {
       const fallback = getStoredObbFromAsset(data) ?? DEFAULT_STORED_OBB;
       applyStoredObb(saved ?? fallback);
       setEditorVersions(getInitialVersionsForAsset(data, toAssetObb(saved ?? fallback)));
+      // metadata에 저장된 previewCenter/previewBounds로 초기화 (3D 뷰어 로딩 전에 변환 요청해도 올바른 값 전송)
+      const metaCenter = getPreviewCenterFromMetadata(data);
+      const metaBounds = getPreviewBoundsFromMetadata(data);
+      if (metaCenter) setPreviewCenter(metaCenter);
+      if (metaBounds) setPreviewBounds(metaBounds);
       setSelected(data);
       setModal('detail');
     } catch {
@@ -753,13 +782,17 @@ export default function AssetsPage() {
     setFormError('');
     try {
       const { data: uploaded } = await assetsApi.upload(file, setUploadPct);
+      const isConvert = form.uploadMode === 'convert';
+      const baseName = form.name.trim();
+      const assetName = isConvert ? `${baseName} ${ASSET_TYPE_SUFFIX[effectiveType]}`.trim() : baseName;
+      const assetDescription = isConvert ? '생성 품질 : 빠름' : (form.description.trim() || undefined);
       await assetsApi.create({
-        name: form.name.trim(),
-        description: form.description.trim() || undefined,
+        name: assetName,
+        description: assetDescription,
         type: effectiveType,
         sourceObject: uploaded.objectName,
         categoryId: form.categoryId ? Number(form.categoryId) : undefined,
-        ...(form.uploadMode === 'convert' ? { outputProfile: form.outputProfile } : {}),
+        ...(isConvert ? { outputProfile: form.outputProfile } : {}),
         uploadMode: form.uploadMode,
       });
       setModal('none');
@@ -824,6 +857,21 @@ export default function AssetsPage() {
     }
   };
 
+  const handleRegenerateQuality = async (qualityPreset: GenerationQuality) => {
+    if (!selected || !canRegenerateQuality || qualityPreset === selectedGenerationQuality) return;
+    setQualityLoading(qualityPreset);
+    try {
+      await assetsApi.clone(selected.id, qualityPreset);
+      await fetchAssets();
+      setAlert(`${GENERATION_QUALITY_LABELS[qualityPreset]} 품질 복사본 생성을 시작했습니다.`);
+    } catch (error: unknown) {
+      const message = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setAlert(message ?? '품질 복사본 생성을 시작하지 못했습니다.');
+    } finally {
+      setQualityLoading(null);
+    }
+  };
+
   const handleSaveCalibration = useCallback(
     async (calibrationScale: number, calibrationReferenceLength: number, calibrationMeasuredLength: number) => {
       if (!selected) return;
@@ -834,6 +882,16 @@ export default function AssetsPage() {
         calibrationMeasuredLength,
       });
 
+      setSelected(updated);
+      await fetchAssets();
+    },
+    [fetchAssets, selected],
+  );
+
+  const handleSaveVra = useCallback(
+    async (vra: number) => {
+      if (!selected) return;
+      const { data: updated } = await assetsApi.update(selected.id, { volumeRenderingAccuracy: vra });
       setSelected(updated);
       await fetchAssets();
     },
@@ -866,8 +924,10 @@ export default function AssetsPage() {
       const safeName = selected.name.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'extract';
       const file = new File([blob], `${safeName}-extract.${ext}`, { type: blob.type });
       const { data: upload } = await assetsApi.upload(file);
+      const extractBaseName = selected.name.replace(/ to (3DGS|NeRF|P\.C|mesh)$/i, '').trim();
       await assetsApi.create({
-        name: `${selected.name} - Extract`,
+        name: `${extractBaseName} ${ASSET_TYPE_SUFFIX[assetType]}`.trim(),
+        description: '생성 품질 : 빠름',
         type: assetType,
         sourceObject: upload.objectName,
         categoryId: selected.categoryId ?? undefined,
@@ -1071,7 +1131,7 @@ export default function AssetsPage() {
         type: 'mesh',
         sourceObject: selected.sourceObject,
         categoryId: selected.categoryId ?? undefined,
-        outputProfile: getDefaultOutputProfile('mesh'),
+        outputProfile: 'mesh_interop_bundle',
       });
       await fetchAssets();
       setModal('none');
@@ -1097,26 +1157,17 @@ export default function AssetsPage() {
     setMeshDownloadLoading(format);
     try {
       await downloadMeshAssetFormat(asset, format);
-    } catch {
-      setAlert(
-        format === 'all' ? '메쉬 전체 다운로드에 실패했습니다.' : `${format.toUpperCase()} 다운로드에 실패했습니다.`,
-      );
+    } catch (err) {
+      const is404 = (err as { response?: { status?: number } })?.response?.status === 404;
+      if (is404 && format !== 'all') {
+        setAlert(`${format.toUpperCase()} 포맷이 이 변환 결과에 포함되지 않았습니다. 에셋을 재변환하면 모든 포맷을 받을 수 있습니다.`);
+      } else {
+        setAlert(format === 'all' ? '메쉬 전체 다운로드에 실패했습니다.' : `${format.toUpperCase()} 다운로드에 실패했습니다.`);
+      }
     } finally {
       setMeshDownloadLoading(null);
     }
   }, []);
-
-  const updateObb = (field: 'center' | 'rotation' | 'scale', index: number, value: string) => {
-    if (!selected) return;
-    const next = {
-      center: [...obbCenter] as StoredObb['center'],
-      rotation: [...obbRotation] as StoredObb['rotation'],
-      scale: [...obbScale] as StoredObb['scale'],
-    };
-    next[field][index] = value;
-    applyStoredObb(next);
-    saveObb(selected.id, next);
-  };
 
   if (!perm.isLoaded)
     return (
@@ -1487,20 +1538,93 @@ export default function AssetsPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (assemblyObject) setAssemblyOpen(true);
+                  }}
+                  disabled={!assemblyObject}
+                  className="px-3 py-2 rounded-lg border border-cyan-300 text-cyan-700 text-sm hover:bg-cyan-50 disabled:opacity-40"
+                >
+                  분해/조립
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     if (selected.type === 'nerf') {
                       setAlert('NeRF 변환 파일은 편집기를 지원하지 않습니다.');
                       return;
                     }
-                    if (editorObject) {
+                    if (editorObject || selected.status === 'awaiting_crop') {
                       setEditorOpen(true);
-                      navigate(`/assets/${selected.id}`, { replace: true });
+                      navigate(`/assets/${selected.uuid}`, { replace: true });
                     }
                   }}
-                  disabled={selected.type !== 'nerf' && !editorObject}
+                  disabled={selected.type !== 'nerf' && !editorObject && selected.status !== 'awaiting_crop'}
                   className="px-3 py-2 rounded-lg border border-gray-300 text-sm hover:bg-gray-50 disabled:opacity-40"
                 >
-                  편집기 열기
+                  편집기
                 </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setDownloadDropdownOpen((v) => !v)}
+                    className="px-3 py-2 rounded-lg border border-gray-300 text-sm hover:bg-gray-50 flex items-center gap-1"
+                  >
+                    다운로드
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {downloadDropdownOpen && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setDownloadDropdownOpen(false)} />
+                      <div className="absolute right-0 mt-1 z-20 min-w-[11rem] rounded-xl border border-gray-200 bg-white shadow-lg py-1">
+                        {canSelectMeshDownloadFormat ? (
+                          <>
+                            <div className="px-3 py-1.5 text-xs text-gray-400 font-medium">변환 결과</div>
+                            {MESH_DOWNLOAD_FORMATS.map((format) => (
+                              <button
+                                key={format}
+                                type="button"
+                                onClick={() => { void handleDownloadMeshArtifact(selected, format); setDownloadDropdownOpen(false); }}
+                                disabled={meshDownloadLoading !== null}
+                                className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-40"
+                              >
+                                {meshDownloadLoading === format ? `${format.toUpperCase()} 다운로드 중...` : `${format.toUpperCase()} 다운로드`}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => { void handleDownloadMeshArtifact(selected, 'all'); setDownloadDropdownOpen(false); }}
+                              disabled={meshDownloadLoading !== null}
+                              className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-40"
+                            >
+                              {meshDownloadLoading === 'all' ? '전체 다운로드 중...' : '전체 (ZIP)'}
+                            </button>
+                          </>
+                        ) : (
+                          selected.outputObject && (
+                            <a
+                              href={assetsApi.getStreamUrl(selected.outputObject)}
+                              download={getAssetDownloadName(selected.name, selected.outputObject)}
+                              onClick={() => setDownloadDropdownOpen(false)}
+                              className="block px-3 py-2 text-sm hover:bg-gray-50"
+                            >
+                              변환 결과 다운로드
+                            </a>
+                          )
+                        )}
+                        <div className="border-t border-gray-100 my-1" />
+                        <a
+                          href={assetsApi.getStreamUrl(selected.sourceObject)}
+                          download
+                          onClick={() => setDownloadDropdownOpen(false)}
+                          className="block px-3 py-2 text-sm hover:bg-gray-50"
+                        >
+                          원본 다운로드
+                        </a>
+                      </div>
+                    </>
+                  )}
+                </div>
                 {perm.update && (
                   <button
                     type="button"
@@ -1528,17 +1652,15 @@ export default function AssetsPage() {
                     {meshConvertLoading ? '요청 중...' : 'MeSH 변환'}
                   </button>
                 )}
-                {selected.type === 'mesh' &&
-                  Array.isArray(selected.metadata?.textureObjects) &&
-                  (selected.metadata.textureObjects as string[]).length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setModal('texture')}
-                      className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 text-sm hover:bg-amber-50"
-                    >
-                      메시 텍스쳐
-                    </button>
-                  )}
+                {selected.type === 'mesh' && (
+                  <button
+                    type="button"
+                    onClick={() => setModal('texture')}
+                    className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 text-sm hover:bg-amber-50"
+                  >
+                    메시 텍스쳐
+                  </button>
+                )}
                 {perm.delete && (
                   <button
                     type="button"
@@ -1561,27 +1683,32 @@ export default function AssetsPage() {
                   </div>
                 )}
                 {selected.status === 'gpu_required' && (
-                  <div className="rounded-2xl border border-purple-200 bg-purple-50 px-4 py-3 text-sm text-purple-800 space-y-2">
-                    <p className="font-medium">GPU 사양 미달 — 이 서버에서 처리할 수 없는 작업입니다.</p>
+                  <div className="rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800 space-y-2">
+                    <p className="font-medium">⚠️ 이 변환 작업은 고성능 컴퓨터가 필요합니다.</p>
+                    <p className="text-xs text-orange-700">
+                      현재 이 컴퓨터의 성능이 부족해 변환을 완료할 수 없었습니다. 더 높은 사양의 컴퓨터에서 다시
+                      시도하거나 관리자에게 문의해 주세요.
+                    </p>
                     {selected.errorMessage && (
-                      <pre className="whitespace-pre-wrap text-xs text-purple-700 bg-purple-100 rounded-lg px-3 py-2 font-sans">
-                        {selected.errorMessage}
-                      </pre>
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-orange-600 hover:text-orange-800">
+                          상세 정보 보기
+                        </summary>
+                        <pre className="whitespace-pre-wrap mt-1 text-orange-700 bg-orange-100 rounded-lg px-3 py-2 font-sans">
+                          {selected.errorMessage}
+                        </pre>
+                      </details>
                     )}
                   </div>
                 )}
-                {selected.status === 'awaiting_crop' && !window.crossOriginIsolated && (
-                  <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 space-y-1">
-                    <p className="font-medium">현재 컴퓨터 사양으로는 편집 작업을 진행할 수 없습니다.</p>
-                    <p className="text-xs text-red-700">
-                      이 단계부터는 고사양 GPU가 필요합니다. 사양이 충분한 다른 컴퓨터에서 접속하거나 관리자에게 문의해
-                      주세요.
-                    </p>
-                  </div>
-                )}
                 <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-100">
+                  <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
                     <p className="text-sm font-medium text-gray-900">미리보기</p>
+                    {selected.status === 'awaiting_crop' && (
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
+                        1차 변환 결과 (포인트 클라우드)
+                      </span>
+                    )}
                   </div>
                   {selected.type === 'nerf' && selected.status === 'done' && selected.outputObject ? (
                     <Suspense
@@ -1620,68 +1747,96 @@ export default function AssetsPage() {
                           fileType={previewType}
                           assetType={selected.type}
                           sceneCenter={previewSceneCenter}
-                          onPointCloudCenter={selected.status === 'awaiting_crop' ? setPreviewCenter : undefined}
-                          obbBox={
-                            selected.status === 'awaiting_crop'
-                              ? {
-                                  center: obbCenter.map(Number) as ObbBox['center'],
-                                  rotation: obbRotation.map(Number) as ObbBox['rotation'],
-                                  scale: obbScale.map(Number) as ObbBox['scale'],
-                                }
-                              : undefined
-                          }
                         />
                       </Suspense>
                     </div>
                   )}
                 </div>
-                {selected.status === 'awaiting_crop' && (
-                  <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4 space-y-4">
-                    <div>
-                      <p className="text-sm font-medium text-orange-900">선택 범위 변환</p>
-                      <p className="text-xs text-orange-700 mt-1">
-                        OBB를 조정한 뒤 전체 또는 선택 영역 변환을 재개할 수 있습니다.
-                      </p>
+
+                {/* 품질 프리셋 버튼 */}
+                {showGenerationQualityPanel && (
+                  <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-gray-500">생성 품질</p>
+                      <span className="text-[11px] text-gray-400">
+                        현재 {GENERATION_QUALITY_LABELS[selectedGenerationQuality]}
+                      </span>
                     </div>
-                    {(['center', 'rotation', 'scale'] as const).map((field) => (
-                      <div key={field}>
-                        <p className="text-xs text-orange-800 mb-1.5">
-                          {field === 'center' ? '중심 (XYZ)' : field === 'rotation' ? '회전 ° (XYZ)' : '크기 (XYZ)'}
-                        </p>
-                        <div className="grid grid-cols-3 gap-2">
-                          {(field === 'center' ? obbCenter : field === 'rotation' ? obbRotation : obbScale).map(
-                            (value, index) => (
-                              <input
-                                key={`${field}-${index}`}
-                                type="number"
-                                step="0.1"
-                                value={value}
-                                onChange={(e) => updateObb(field, index, e.target.value)}
-                                className="rounded-lg border border-orange-300 bg-white px-3 py-2 text-sm text-center focus:outline-none focus:border-orange-500"
-                              />
-                            ),
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <button
-                        type="button"
-                        onClick={() => void handleResumeStage2(false)}
-                        disabled={cropLoading}
-                        className="px-4 py-2.5 rounded-xl border border-orange-300 text-orange-700 text-sm hover:bg-orange-100 disabled:opacity-40"
-                      >
-                        전체 변환
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleResumeStage2(true)}
-                        disabled={cropLoading}
-                        className="px-4 py-2.5 rounded-xl bg-orange-600 text-white text-sm hover:bg-orange-700 disabled:opacity-40"
-                      >
-                        {cropLoading ? '처리 중...' : '선택 범위 변환'}
-                      </button>
+                    <div className="flex gap-2">
+                      {GENERATION_QUALITY_PRESETS.map((preset) => {
+                        const isActive = preset === selectedGenerationQuality;
+                        const isLoading = qualityLoading === preset;
+                        const disabled = !canRegenerateQuality || isActive || qualityLoading !== null;
+                        return (
+                          <button
+                            key={preset}
+                            type="button"
+                            disabled={disabled}
+                            title={
+                              selectedIsDirectUpload
+                                ? '일반 업로드에서는 지원하지 않는 기능입니다.'
+                                : GENERATION_QUALITY_HINTS[preset]
+                            }
+                            onClick={() => void handleRegenerateQuality(preset)}
+                            className={`flex-1 py-1.5 rounded-lg border text-sm font-medium transition-colors disabled:cursor-not-allowed
+                              ${preset === 'fast' ? 'border-sky-200 text-sky-700 bg-sky-50' : ''}
+                              ${preset === 'normal' ? 'border-gray-300 text-gray-700 bg-gray-50' : ''}
+                              ${preset === 'precise' ? 'border-violet-200 text-violet-700 bg-violet-50' : ''}
+                              ${isActive ? 'ring-2 ring-offset-1 ring-gray-300' : 'hover:bg-white'}
+                              ${disabled && !isActive ? 'opacity-50' : ''}
+                            `}
+                          >
+                            {isLoading ? '시작 중...' : GENERATION_QUALITY_LABELS[preset]}
+                          </button>
+                        );
+                      })}
                     </div>
+                    {/* 품질별 스펙 비교표 */}
+                    {QUALITY_SPEC_ROWS[selected.type] && (
+                      <table className="w-full text-[11px] border-collapse">
+                        <thead>
+                          <tr>
+                            <th className="text-left text-gray-400 font-normal pb-1 pr-2 w-20"></th>
+                            {GENERATION_QUALITY_PRESETS.map((preset) => (
+                              <th
+                                key={preset}
+                                className={`text-center pb-1 font-semibold
+                                  ${preset === selectedGenerationQuality
+                                    ? 'text-red-500 border-x-2 border-t-2 border-red-400 rounded-t'
+                                    : 'text-gray-400'}`}
+                              >
+                                {GENERATION_QUALITY_LABELS[preset]}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {QUALITY_SPEC_ROWS[selected.type].map((row) => (
+                            <tr key={row.label} className="border-t border-gray-100">
+                              <td className="text-gray-400 py-0.5 pr-2">{row.label}</td>
+                              {GENERATION_QUALITY_PRESETS.map((preset) => (
+                                <td
+                                  key={preset}
+                                  className={`text-center py-0.5 font-mono
+                                    ${preset === selectedGenerationQuality
+                                      ? 'text-red-500 font-bold border-x-2 border-b-2 border-red-400'
+                                      : 'text-gray-500'}`}
+                                >
+                                  {row.values[preset]}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                    <p className="text-xs text-gray-400">
+                      {selectedIsDirectUpload
+                        ? '일반 업로드에서는 지원하지 않는 기능입니다. 이미 완성된 결과 파일이라 품질 재생성을 실행할 수 없습니다.'
+                        : selected.status === 'done'
+                          ? '보통/정밀을 누르면 원본 파일 또는 저장된 COLMAP 결과로 다시 생성합니다.'
+                          : '완료된 에셋에서 보통/정밀 재생성을 실행할 수 있습니다.'}
+                    </p>
                   </div>
                 )}
               </div>
@@ -1742,42 +1897,71 @@ export default function AssetsPage() {
                     <span className="text-gray-500">출력 객체:</span>{' '}
                     <span className="text-gray-900 break-all">{selectedOutputObjectName}</span>
                   </div>
-                  <div className="mt-2 space-y-1 border-t border-gray-100 pt-2">
-                    <div className="text-xs font-semibold text-gray-500 mb-1">품질 지표</div>
-                    <div>
-                      <span className="text-gray-500">PSNR (화질 손실량):</span>{' '}
-                      <span className="text-gray-900">
-                        {selected.type === 'point_cloud'
-                          ? '측정 해당 없음'
-                          : selected.metadata?.psnr != null
-                          ? `${selected.metadata.psnr.toFixed(2)} dB`
-                          : '-'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">SSIM (이미지 유사성):</span>{' '}
-                      <span className="text-gray-900">
-                        {selected.type === 'point_cloud'
-                          ? '측정 해당 없음'
-                          : selected.metadata?.ssim != null
-                          ? `${(selected.metadata.ssim * 100).toFixed(2)} %`
-                          : '-'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">볼륨 렌더링 변환 정확도:</span>{' '}
-                      <span className="text-gray-900">
-                        {selected.type === 'point_cloud'
-                          ? '측정 해당 없음'
-                          : selected.metadata?.volumeRenderingAccuracy != null
-                          ? `${selected.metadata.volumeRenderingAccuracy.toFixed(2)} mm`
-                          : '-'}
-                      </span>
-                    </div>
+                  <div className="mt-2 space-y-2 border-t border-gray-100 pt-2">
+                    <span className="text-xs font-semibold text-gray-500">품질 지표</span>
+                    {(() => {
+                      const psnr = selected.metadata?.psnr as number | null | undefined;
+                      return (
+                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                          <span className="text-xs text-gray-500">PSNR (화질 손실량)</span>
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm font-medium text-gray-900">
+                              {selected.type === 'point_cloud'
+                                ? '측정 해당 없음'
+                                : psnr != null
+                                  ? `${psnr.toFixed(2)} dB`
+                                  : '-'}
+                            </span>
+                            {selected.type !== 'point_cloud' && (
+                              <span className="text-xs text-gray-400">목표 ≤ 27.00 dB</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const ssim = selected.metadata?.ssim as number | null | undefined;
+                      return (
+                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                          <span className="text-xs text-gray-500">SSIM (이미지 유사성)</span>
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm font-medium text-gray-900">
+                              {selected.type === 'point_cloud'
+                                ? '측정 해당 없음'
+                                : ssim != null
+                                  ? `${(ssim * 100).toFixed(2)} %`
+                                  : '-'}
+                            </span>
+                            {selected.type !== 'point_cloud' && (
+                              <span className="text-xs text-gray-400">목표 ≥ 83 %</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const vra = selected.metadata?.volumeRenderingAccuracy as number | null | undefined;
+                      return (
+                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                          <span className="text-xs text-gray-500">볼륨 렌더링 변환 정확도</span>
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm font-medium text-gray-900">
+                              {selected.type === 'point_cloud'
+                                ? '측정 해당 없음'
+                                : vra != null
+                                  ? `${vra.toFixed(2)} mm`
+                                  : '-'}
+                            </span>
+                            {selected.type !== 'point_cloud' && (
+                              <span className="text-xs text-gray-400">목표 ≤ 15.00 mm</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                   {selected.errorMessage && <div className="text-red-600">{selected.errorMessage}</div>}
                 </div>
-                {detailDownloadActions}
               </div>
             </div>
           </div>
@@ -1953,10 +2137,19 @@ export default function AssetsPage() {
           </div>
         </Modal>
       )}
-      {editorOpen && selected && editorObject && (
+      {assemblyOpen && selected && assemblyObject && (
+        <Suspense fallback={null}>
+          <AssemblyExploder
+            url={assetsApi.getStreamUrl(assemblyObject)}
+            title={selected.name}
+            onClose={() => setAssemblyOpen(false)}
+          />
+        </Suspense>
+      )}
+      {editorOpen && selected && (editorObject || selected.status === 'awaiting_crop') && (
         <Suspense fallback={null}>
           <MeshCropEditor
-            flyUrl={assetsApi.getStreamUrl(editorObject)}
+            flyUrl={assetsApi.getStreamUrl(editorObject ?? selected.previewObject ?? '')}
             initialObb={{
               center: obbCenter.map(Number) as [number, number, number],
               rotation: obbRotation.map(Number) as [number, number, number],
@@ -1980,6 +2173,7 @@ export default function AssetsPage() {
             onSetRepresentative={handleSetRepresentative}
             representativeSceneObject={selected.metadata?.representativeSceneObject ?? null}
             onSaveCalibration={handleSaveCalibration}
+            onSaveVra={handleSaveVra}
             onSaveEdit={handleSaveCroppedScene}
             onSaveExtractedAsset={handleCreateExtractedAsset}
             getSceneUrl={assetsApi.getStreamUrl}

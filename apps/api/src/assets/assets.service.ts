@@ -37,7 +37,22 @@ type AssetObbVersion = {
   sceneObject?: string;
 };
 
+type GenerationQuality = 'fast' | 'normal' | 'precise';
+
 const MAX_OBB_VERSIONS = 50;
+const DEFAULT_GENERATION_QUALITY: GenerationQuality = 'fast';
+const GENERATION_QUALITIES = new Set<GenerationQuality>(['fast', 'normal', 'precise']);
+const REGENERATABLE_TYPES = new Set<AssetType>([
+  AssetType.POINT_CLOUD,
+  AssetType.NERF,
+  AssetType.GAUSSIAN,
+  AssetType.MESH,
+]);
+const BUSY_REGENERATION_STATUSES = new Set<AssetStatus>([
+  AssetStatus.PENDING,
+  AssetStatus.PROCESSING,
+  AssetStatus.AWAITING_CROP,
+]);
 const MESH_INTEROP_DOWNLOADS = {
   glb: { entryPath: 'output.glb', contentType: 'model/gltf-binary' },
   obj: { entryPath: 'output.obj', contentType: 'model/obj' },
@@ -56,7 +71,7 @@ export class AssetsService {
     private readonly conversionProducer: ConversionProducer,
   ) {}
 
-  async create(dto: CreateAssetDto, userId: string): Promise<Asset> {
+  async create(dto: CreateAssetDto, userId: number): Promise<Asset> {
     const { outputProfile: requestedOutputProfile, uploadMode = 'convert', ...assetDto } = dto;
     const detectedInput = detectInputFormat(assetDto.sourceObject);
     if (uploadMode !== 'direct' && requestedOutputProfile && !isSupportedOutputProfile(assetDto.type, requestedOutputProfile)) {
@@ -70,6 +85,7 @@ export class AssetsService {
     const outputProfile = uploadMode === 'direct'
       ? getDefaultOutputProfile(assetDto.type, detectedInput)
       : (requestedOutputProfile ?? getDefaultOutputProfile(assetDto.type, detectedInput));
+    const generationQuality = DEFAULT_GENERATION_QUALITY;
     const asset = this.assetRepo.create({
       ...assetDto,
       userId,
@@ -84,6 +100,7 @@ export class AssetsService {
         inputContainer: detectedInput.container,
         outputProfile,
         uploadMode,
+        generationQuality,
       },
     });
     const saved = await this.assetRepo.save(asset);
@@ -98,6 +115,7 @@ export class AssetsService {
         assetType: saved.type,
         sourceObject: saved.sourceObject,
         outputProfile,
+        qualityPreset: generationQuality,
         userId,
       });
       await this.assetRepo.update(saved.id, { jobId: job });
@@ -109,7 +127,7 @@ export class AssetsService {
     return saved;
   }
 
-  async findAll(userId: string, categoryId?: number): Promise<(Asset & { url: string; previewUrl?: string })[]> {
+  async findAll(userId: number, categoryId?: number): Promise<(Asset & { url: string; previewUrl?: string })[]> {
     const where: Record<string, unknown> = { userId };
     if (categoryId) where.categoryId = categoryId;
     const assets = await this.assetRepo.find({
@@ -129,7 +147,24 @@ export class AssetsService {
     );
   }
 
-  async findOne(id: string, userId: string): Promise<Asset & { url: string; previewUrl?: string; outputUrl?: string }> {
+  async findOneByUuid(uuid: string, userId: number): Promise<Asset & { url: string; previewUrl?: string; outputUrl?: string }> {
+    const asset = await this.assetRepo.findOne({ where: { uuid, userId } });
+    if (!asset) throw new NotFoundException('Asset not found');
+
+    const url = await this.storage.getPresignedUrl(asset.sourceObject);
+    const previewUrl = asset.previewObject
+      ? await this.storage.getPresignedUrl(asset.previewObject)
+      : undefined;
+
+    let outputUrl: string | undefined;
+    if (asset.status === AssetStatus.DONE && asset.outputObject) {
+      outputUrl = await this.storage.getPresignedUrl(asset.outputObject);
+    }
+
+    return { ...asset, url, previewUrl, outputUrl };
+  }
+
+  async findOne(id: number, userId: number): Promise<Asset & { url: string; previewUrl?: string; outputUrl?: string }> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
@@ -146,14 +181,14 @@ export class AssetsService {
     return { ...asset, url, previewUrl, outputUrl };
   }
 
-  async getObbVersions(id: string, userId: string): Promise<AssetObbVersion[]> {
+  async getObbVersions(id: number, userId: number): Promise<AssetObbVersion[]> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
     return this.readObbVersions(asset.metadata);
   }
 
-  async update(id: string, dto: UpdateAssetDto, userId: string): Promise<Asset> {
+  async update(id: number, dto: UpdateAssetDto, userId: number): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id } });
     if (!asset) throw new NotFoundException('Asset not found');
     if (asset.userId !== userId) throw new ForbiddenException('Forbidden');
@@ -163,6 +198,7 @@ export class AssetsService {
       calibrationReferenceLength,
       calibrationMeasuredLength,
       representativeSceneObject,
+      volumeRenderingAccuracy,
       ...restDto
     } = dto;
 
@@ -172,7 +208,8 @@ export class AssetsService {
       calibrationScale !== undefined ||
       calibrationReferenceLength !== undefined ||
       calibrationMeasuredLength !== undefined ||
-      representativeSceneObject !== undefined
+      representativeSceneObject !== undefined ||
+      volumeRenderingAccuracy !== undefined
     ) {
       const nextMetadata: Record<string, unknown> = {
         ...(asset.metadata ?? {}),
@@ -180,6 +217,7 @@ export class AssetsService {
         ...(calibrationReferenceLength !== undefined ? { calibrationReferenceLength } : {}),
         ...(calibrationMeasuredLength !== undefined ? { calibrationMeasuredLength } : {}),
         ...(representativeSceneObject ? { representativeSceneObject } : {}),
+        ...(volumeRenderingAccuracy !== undefined ? { volumeRenderingAccuracy } : {}),
       };
       if (representativeSceneObject === null) delete nextMetadata.representativeSceneObject;
       asset.metadata = nextMetadata;
@@ -188,7 +226,7 @@ export class AssetsService {
     return this.assetRepo.save(asset);
   }
 
-  async createObbVersion(id: string, userId: string, dto: CreateAssetObbVersionDto): Promise<Asset> {
+  async createObbVersion(id: number, userId: number, dto: CreateAssetObbVersionDto): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
@@ -219,8 +257,8 @@ export class AssetsService {
   }
 
   async updateObbVersion(
-    id: string,
-    userId: string,
+    id: number,
+    userId: number,
     versionId: string,
     dto: UpdateAssetObbVersionDto,
   ): Promise<Asset> {
@@ -254,7 +292,7 @@ export class AssetsService {
     return this.assetRepo.save(asset);
   }
 
-  async removeObbVersion(id: string, userId: string, versionId: string): Promise<Asset> {
+  async removeObbVersion(id: number, userId: number, versionId: string): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
@@ -272,8 +310,8 @@ export class AssetsService {
   }
 
   async resumeStage2(
-    id: string,
-    userId: string,
+    id: number,
+    userId: number,
     params: { obbCenter?: number[]; obbRotation?: number[]; obbScale?: number[]; previewCenter?: number[]; previewBounds?: number[] },
   ): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
@@ -290,6 +328,7 @@ export class AssetsService {
     const outputProfile = typeof metadata.outputProfile === 'string' && isSupportedOutputProfile(asset.type, metadata.outputProfile)
       ? metadata.outputProfile
       : getDefaultOutputProfile(asset.type, detectedInput);
+    const generationQuality = this.normalizeGenerationQuality(metadata.generationQuality) ?? DEFAULT_GENERATION_QUALITY;
 
     const fallbackPreviewCenter = Array.isArray(metadata.previewCenter)
       ? metadata.previewCenter as number[]
@@ -314,6 +353,7 @@ export class AssetsService {
       assetType: asset.type,
       colmapObject,
       outputProfile,
+      qualityPreset: generationQuality,
       obbParams,
       userId,
     });
@@ -328,6 +368,7 @@ export class AssetsService {
         inputKind: metadata.inputKind ?? detectedInput.kind,
         inputContainer: metadata.inputContainer ?? detectedInput.container,
         outputProfile,
+        generationQuality,
         ...(previewCenter ? { previewCenter } : {}),
         ...(previewBounds ? { previewBounds } : {}),
         obbParams,
@@ -337,14 +378,184 @@ export class AssetsService {
     return this.assetRepo.findOne({ where: { id } }) as Promise<Asset>;
   }
 
-  async rename(id: string, userId: string, name: string): Promise<Asset> {
+  async regenerate(id: number, userId: number, requestedQuality: GenerationQuality): Promise<Asset> {
+    const asset = await this.assetRepo.findOne({ where: { id, userId } });
+    if (!asset) throw new NotFoundException('Asset not found');
+    if (!REGENERATABLE_TYPES.has(asset.type)) {
+      throw new BadRequestException('This asset type does not support quality regeneration');
+    }
+    if (BUSY_REGENERATION_STATUSES.has(asset.status)) {
+      throw new BadRequestException('The asset is already being processed');
+    }
+
+    const qualityPreset = this.normalizeGenerationQuality(requestedQuality);
+    if (!qualityPreset) throw new BadRequestException('Unsupported generation quality');
+
+    const metadata = this.asMetadataRecord(asset.metadata);
+    if (this.isDirectUploadAsset(asset, metadata)) {
+      throw new BadRequestException('Direct-uploaded assets do not support regeneration');
+    }
+
+    const detectedInput = detectInputFormat(asset.sourceObject);
+    const outputProfile = typeof metadata.outputProfile === 'string' && isSupportedOutputProfile(asset.type, metadata.outputProfile)
+      ? metadata.outputProfile
+      : getDefaultOutputProfile(asset.type, detectedInput);
+    const colmapObject = typeof metadata.colmapObject === 'string' ? metadata.colmapObject : undefined;
+    const previewCenter = this.normalizeTriplet(metadata.previewCenter);
+    const previewBounds = this.normalizeTriplet(metadata.previewBounds);
+    const savedObb = this.normalizeObb(metadata.obbParams);
+    const obbParams = savedObb ? {
+      center: savedObb.center,
+      rotation: savedObb.rotation,
+      scale: savedObb.scale,
+      ...(previewCenter ? { previewCenter } : {}),
+      ...(previewBounds ? { previewBounds } : {}),
+    } : undefined;
+
+    const job = colmapObject
+      ? await this.conversionProducer.addStage2Job({
+          assetId: id,
+          assetType: asset.type,
+          colmapObject,
+          outputProfile,
+          qualityPreset,
+          obbParams,
+          userId,
+        })
+      : await this.conversionProducer.addConversionJob({
+          assetId: id,
+          assetType: asset.type,
+          sourceObject: asset.sourceObject,
+          outputProfile,
+          qualityPreset,
+          userId,
+        });
+
+    await this.assetRepo.update(id, {
+      status: AssetStatus.PROCESSING,
+      progress: colmapObject ? 55 : 0,
+      jobId: job,
+      errorMessage: null,
+      metadata: {
+        ...metadata,
+        inputFormat: metadata.inputFormat ?? detectedInput.extension ?? null,
+        inputKind: metadata.inputKind ?? detectedInput.kind,
+        inputContainer: metadata.inputContainer ?? detectedInput.container,
+        outputProfile,
+        generationQuality: qualityPreset,
+        generationQualityRequestedAt: new Date().toISOString(),
+      },
+    } as Partial<Asset>);
+
+    return this.assetRepo.findOne({ where: { id } }) as Promise<Asset>;
+  }
+
+  async cloneWithQuality(id: number, userId: number, requestedQuality: GenerationQuality): Promise<Asset> {
+    const source = await this.assetRepo.findOne({ where: { id, userId } });
+    if (!source) throw new NotFoundException('Asset not found');
+    if (!REGENERATABLE_TYPES.has(source.type)) {
+      throw new BadRequestException('This asset type does not support quality cloning');
+    }
+
+    const qualityPreset = this.normalizeGenerationQuality(requestedQuality);
+    if (!qualityPreset) throw new BadRequestException('Unsupported generation quality');
+
+    const sourceMetadata = this.asMetadataRecord(source.metadata);
+    if (this.isDirectUploadAsset(source, sourceMetadata)) {
+      throw new BadRequestException('Direct-uploaded assets do not support cloning');
+    }
+
+    const TYPE_SUFFIX: Record<string, string> = {
+      gaussian: 'to 3DGS',
+      nerf: 'to NeRF',
+      point_cloud: 'to P.C',
+      mesh: 'to mesh',
+    };
+    const QUALITY_LABELS: Record<GenerationQuality, string> = {
+      fast: '빠름',
+      normal: '보통',
+      precise: '정밀',
+    };
+
+    const typeSuffix = TYPE_SUFFIX[source.type] ?? '';
+    const baseName = source.name.replace(/ to (3DGS|NeRF|P\.C|mesh)$/, '').trim();
+    const cloneName = `${baseName} ${typeSuffix}`.trim();
+    const cloneDescription = `생성 품질 : ${QUALITY_LABELS[qualityPreset]}`;
+
+    const detectedInput = detectInputFormat(source.sourceObject);
+    const outputProfile = typeof sourceMetadata.outputProfile === 'string' && isSupportedOutputProfile(source.type, sourceMetadata.outputProfile)
+      ? sourceMetadata.outputProfile
+      : getDefaultOutputProfile(source.type, detectedInput);
+    const colmapObject = typeof sourceMetadata.colmapObject === 'string' ? sourceMetadata.colmapObject : undefined;
+    const previewCenter = this.normalizeTriplet(sourceMetadata.previewCenter);
+    const previewBounds = this.normalizeTriplet(sourceMetadata.previewBounds);
+    const savedObb = this.normalizeObb(sourceMetadata.obbParams);
+    const obbParams = savedObb ? {
+      center: savedObb.center,
+      rotation: savedObb.rotation,
+      scale: savedObb.scale,
+      ...(previewCenter ? { previewCenter } : {}),
+      ...(previewBounds ? { previewBounds } : {}),
+    } : undefined;
+
+    const clone = this.assetRepo.create({
+      name: cloneName,
+      description: cloneDescription,
+      type: source.type,
+      status: AssetStatus.PENDING,
+      progress: colmapObject ? 55 : 0,
+      sourceObject: source.sourceObject,
+      previewObject: source.previewObject ?? undefined,
+      categoryId: source.categoryId ?? undefined,
+      userId,
+      approved: false,
+      metadata: {
+        ...sourceMetadata,
+        outputProfile,
+        generationQuality: qualityPreset,
+        generationQualityRequestedAt: new Date().toISOString(),
+      },
+    });
+    const saved = await this.assetRepo.save(clone);
+
+    try {
+      const job = colmapObject
+        ? await this.conversionProducer.addStage2Job({
+            assetId: saved.id,
+            assetType: saved.type,
+            colmapObject,
+            outputProfile,
+            qualityPreset,
+            obbParams,
+            userId,
+          })
+        : await this.conversionProducer.addConversionJob({
+            assetId: saved.id,
+            assetType: saved.type,
+            sourceObject: saved.sourceObject,
+            outputProfile,
+            qualityPreset,
+            userId,
+          });
+      await this.assetRepo.update(saved.id, {
+        status: colmapObject ? AssetStatus.PROCESSING : AssetStatus.PENDING,
+        jobId: job,
+      });
+    } catch (err) {
+      console.error('[Queue] Failed to add clone job:', err);
+    }
+
+    return this.assetRepo.findOne({ where: { id: saved.id } }) as Promise<Asset>;
+  }
+
+  async rename(id: number, userId: number, name: string): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
     asset.name = name.trim();
     return this.assetRepo.save(asset);
   }
 
-  async toggleApproval(id: string, userId: string): Promise<Asset> {
+  async toggleApproval(id: number, userId: number): Promise<Asset> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
     asset.approved = !asset.approved;
@@ -354,9 +565,9 @@ export class AssetsService {
 
   // NeRF ZIP에서 프레임 목록을 추출하여 반환 (sorted)
   // 결과를 in-memory 캐싱하여 반복 요청 시 ZIP을 다시 스캔하지 않음
-  private readonly nerfFrameCache = new Map<string, string[]>();
+  private readonly nerfFrameCache = new Map<number, string[]>();
 
-  async getNerfFramePaths(id: string, userId: string): Promise<string[]> {
+  async getNerfFramePaths(id: number, userId: number): Promise<string[]> {
     const cached = this.nerfFrameCache.get(id);
     if (cached) return cached;
 
@@ -386,7 +597,7 @@ export class AssetsService {
     return paths;
   }
 
-  async streamNerfFrame(id: string, userId: string, framePath: string, res: Response): Promise<void> {
+  async streamNerfFrame(id: number, userId: number, framePath: string, res: Response): Promise<void> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset || asset.type !== 'nerf' || !asset.outputObject) {
       throw new NotFoundException('NeRF 에셋 또는 출력물을 찾을 수 없습니다.');
@@ -425,7 +636,7 @@ export class AssetsService {
     });
   }
 
-  async streamOutputArtifact(id: string, userId: string, format: string, res: Response): Promise<void> {
+  async streamOutputArtifact(id: number, userId: number, format: string, res: Response): Promise<void> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
@@ -474,8 +685,12 @@ export class AssetsService {
     await new Promise<void>((resolve, reject) => {
       const parseStream = unzipper.Parse();
 
+      const targetExt = `.${normalizedFormat}`;
       parseStream.on('entry', (entry: unzipper.Entry) => {
-        if (!found && entry.path.toLowerCase() === download.entryPath) {
+        const entryName = entry.path.toLowerCase();
+        const matchExact = entryName === download.entryPath;
+        const matchExt = !matchExact && entryName.endsWith(targetExt) && !entryName.includes('/');
+        if (!found && (matchExact || matchExt)) {
           found = true;
           res.setHeader('Content-Type', download.contentType);
           res.setHeader('Content-Disposition', this.getAttachmentHeader(`${safeBaseName}.${normalizedFormat}`));
@@ -502,7 +717,7 @@ export class AssetsService {
     });
   }
 
-  async remove(id: string, userId: string): Promise<void> {
+  async remove(id: number, userId: number): Promise<void> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
 
@@ -523,6 +738,13 @@ export class AssetsService {
     }
 
     return {};
+  }
+
+  private isDirectUploadAsset(asset: Asset, metadata = this.asMetadataRecord(asset.metadata)): boolean {
+    if (metadata.uploadMode === 'direct') return true;
+    if (metadata.uploadMode === 'convert') return false;
+
+    return asset.status === AssetStatus.DONE && !!asset.outputObject && asset.outputObject === asset.sourceObject;
   }
 
   private readObbVersions(metadata: Asset['metadata'] | null | undefined): AssetObbVersion[] {
@@ -560,6 +782,12 @@ export class AssetsService {
       obb,
       ...(sceneObject ? { sceneObject } : {}),
     };
+  }
+
+  private normalizeGenerationQuality(value: unknown): GenerationQuality | null {
+    return typeof value === 'string' && GENERATION_QUALITIES.has(value as GenerationQuality)
+      ? value as GenerationQuality
+      : null;
   }
 
   private normalizeObb(value: unknown): AssetObb | null {

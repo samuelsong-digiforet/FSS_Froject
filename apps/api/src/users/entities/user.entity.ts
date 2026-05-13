@@ -15,8 +15,8 @@ export enum UserRole {
 
 @Entity('users')
 export class User {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+  @PrimaryGeneratedColumn()
+  id: number;
 
   @Column({ unique: true })
   email: string;
@@ -64,7 +64,7 @@ export class User {
   createdBy: User;
 
   @Column({ name: 'created_by', nullable: true })
-  createdById: string;
+  createdById: number;
 
   // 수정자
   @ManyToOne(() => User, { nullable: true })
@@ -72,7 +72,7 @@ export class User {
   updatedBy: User;
 
   @Column({ name: 'updated_by', nullable: true })
-  updatedById: string;
+  updatedById: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

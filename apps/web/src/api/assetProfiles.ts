@@ -107,7 +107,12 @@ export function getDefaultOutputProfile(assetType: AssetType, fileName?: string)
     case 'gaussian':
       return 'gaussian_ply';
     case 'mesh':
-      if (detected?.kind === 'cad' || detected?.kind === 'image_bundle' || detected?.kind === 'video') {
+      if (
+        detected?.kind === 'cad' ||
+        detected?.kind === 'mesh' ||
+        detected?.kind === 'image_bundle' ||
+        detected?.kind === 'video'
+      ) {
         return 'mesh_interop_bundle';
       }
       return 'mesh_glb';

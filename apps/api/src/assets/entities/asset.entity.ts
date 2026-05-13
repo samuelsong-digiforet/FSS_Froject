@@ -13,8 +13,7 @@ import { AssetCategory } from '../../asset-categories/entities/asset-category.en
 export enum AssetStatus {
   PENDING        = 'pending',        // 업로드 완료, 변환 대기
   PROCESSING     = 'processing',     // 1단계 변환 중 (COLMAP + 빠른 splat)
-  PREVIEW_READY  = 'preview_ready',  // fly file 완성 — 미리보기 가능, 풀 트레이닝 진행 중
-  AWAITING_CROP  = 'awaiting_crop',  // mesh: Stage 1 완료, 사용자 영역 선택 대기
+  AWAITING_CROP  = 'awaiting_crop',  // mesh: Stage 1 완료, 영역 선택 대기
   DONE           = 'done',           // 2단계 풀 변환 완료
   FAILED         = 'failed',         // 변환 실패
   GPU_REQUIRED   = 'gpu_required',   // GPU 서버 필요 (3DGS/NeRF)
@@ -29,8 +28,11 @@ export enum AssetType {
 
 @Entity('assets')
 export class Asset {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ unique: true, default: () => 'gen_random_uuid()' })
+  uuid: string;
 
   @Column()
   name: string;
@@ -88,7 +90,7 @@ export class Asset {
   user: User;
 
   @Column({ name: 'user_id' })
-  userId: string;
+  userId: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

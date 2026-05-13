@@ -6,6 +6,17 @@
  *   [저장] → 서버 업로드 (크롭 후에만 활성)
  *   [크롭 취소] → 저장 전이면 원본 복원 가능
  */
+
+// crypto.randomUUID는 HTTPS/localhost에서만 동작 — HTTP 사내망 환경을 위한 폴리필
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
 import {
   useRef,
   useState,
@@ -2438,6 +2449,7 @@ export default function MeshCropEditor({
   representativeSceneObject,
   onDraftObbChange,
   onSaveCalibration,
+  onSaveVra,
   onConfirm,
   onClose,
   loading,
@@ -2464,6 +2476,7 @@ export default function MeshCropEditor({
     calibrationReferenceLength: number,
     calibrationMeasuredLength: number,
   ) => Promise<void> | void;
+  onSaveVra?: (vra: number) => Promise<void> | void;
   onConfirm?: (obb: CropConfirmParams | null) => void;
   onClose: () => void;
   loading: boolean;
@@ -2494,6 +2507,9 @@ export default function MeshCropEditor({
   );
   const [calibrationUnit, setCalibrationUnit] = useState<'m' | 'cm' | 'mm'>('m');
   const [calibrationSaving, setCalibrationSaving] = useState(false);
+  const [vraMode, setVraMode] = useState(false);
+  const [vraPoints, setVraPoints] = useState<{ measured: number; actual: string }[]>([]);
+  const [vraSaving, setVraSaving] = useState(false);
   const [gdtMode, setGdtMode] = useState(false);
   const [gdtVisible, setGdtVisible] = useState(true);
   const [gdtAnnotations, setGdtAnnotations] = useState<
@@ -3683,6 +3699,24 @@ export default function MeshCropEditor({
     }
   }, [calibrationReferenceLengthMeters, canSaveCalibration, measureDistanceRaw, onSaveCalibration, showToast]);
 
+  const handleSaveVra = useCallback(async () => {
+    const validPts = vraPoints.filter((p) => {
+      const a = parseFloat(p.actual);
+      return Number.isFinite(a) && a > 0;
+    });
+    if (validPts.length === 0) return;
+    const vra = validPts.reduce((sum, p) => sum + Math.abs(p.measured - parseFloat(p.actual)), 0) / validPts.length;
+    setVraSaving(true);
+    try {
+      await onSaveVra?.(vra);
+      showToast(`VRA 저장 완료 — ${vra.toFixed(2)} mm (${validPts.length}개 측정)`);
+    } catch (error) {
+      showToast((error as Error).message ?? 'VRA 저장에 실패했습니다.', 'err');
+    } finally {
+      setVraSaving(false);
+    }
+  }, [onSaveVra, showToast, vraPoints]);
+
   // ── Ctrl+Z ───────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3884,35 +3918,29 @@ export default function MeshCropEditor({
           <>
             <button
               onClick={() => {
-                setCutMode((prev) => {
+                setVraMode((prev) => {
                   const next = !prev;
                   if (next) {
+                    setCutMode(false);
+                    setMeasureMode(true);
+                    setMeasurePts([]);
+                  } else {
                     setMeasureMode(false);
                     setMeasurePts([]);
                   }
                   return next;
                 });
-                setIsCutDragging(false);
               }}
               disabled={busy}
-              title="자유 컷 모드"
+              title="VRA 치수 입력 모드"
               className={`flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors ${
-                cutMode
-                  ? 'border-rose-400 bg-rose-900/40 text-rose-200'
+                vraMode
+                  ? 'border-blue-400 bg-blue-900/40 text-blue-200'
                   : 'border-gray-600 text-gray-300 hover:bg-gray-700'
               } disabled:opacity-40`}
             >
-              <Icon d="M4 4l16 16M7.5 7.5l9 9M15 5l4 4-9.5 9.5a2.121 2.121 0 0 1-3 0l-1-1a2.121 2.121 0 0 1 0-3L15 5z" />
-              자유 컷
-            </button>
-            <button
-              onClick={() => clearCutStroke(true)}
-              disabled={busy || cutStroke.length === 0}
-              title="현재 그린 경로 지우기"
-              className="flex items-center gap-1 px-2 py-1 text-xs rounded text-gray-300 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <Icon d="M6 18 18 6M6 6l12 12" />
-              경로 지우기
+              <Icon d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 11h.01M12 11h.01M15 11h.01M4 19h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2z" />
+              VRA 치수 입력
             </button>
             {isGaussianAsset && hasLocalSceneEdits && !isExtracted && (
               <button
@@ -4224,7 +4252,7 @@ export default function MeshCropEditor({
             <button
               onClick={() =>
                 onConfirm({
-                  ...getActiveObb(),
+                  ...getLocalObb(getActiveObb()),
                   previewCenter: [...previewCenterRef.current] as [number, number, number],
                   previewBounds: [...previewBoundsRef.current] as [number, number, number],
                 })
@@ -4301,7 +4329,7 @@ export default function MeshCropEditor({
             onPick={(type, tol) => {
               setGdtAnnotations((prev) => [
                 ...prev,
-                { id: crypto.randomUUID(), position: gdtPending, type, tolerance: tol },
+                { id: generateUUID(), position: gdtPending, type, tolerance: tol },
               ]);
               setGdtPending(null);
             }}
@@ -4400,19 +4428,19 @@ export default function MeshCropEditor({
         </div>
 
         {/* 거리 측정 결과 오버레이 */}
-        {measureMode && measureDistance !== null && (
+        {measureMode && !vraMode && measureDistance !== null && (
           <div className="absolute top-3 right-3 bg-black/80 border border-yellow-500/60 text-yellow-300 text-sm px-4 py-2.5 rounded-lg pointer-events-none">
             <span className="text-gray-400 text-xs block mb-0.5">두 점 사이 거리</span>
             <span className="font-mono font-bold text-lg">{measureDistance.toFixed(3)}m</span>
           </div>
         )}
-        {measureMode && measurePts.length === 1 && (
+        {measureMode && !vraMode && measurePts.length === 1 && (
           <div className="absolute top-3 right-3 bg-black/70 border border-yellow-500/40 text-yellow-400 text-xs px-3 py-2 rounded-lg pointer-events-none">
             두 번째 점을 클릭하세요
           </div>
         )}
 
-        {measureMode && measureDistanceRaw !== null && (
+        {measureMode && !vraMode && measureDistanceRaw !== null && (
           <div className="absolute top-24 right-3 bg-black/85 border border-yellow-500/40 text-gray-100 text-xs px-3 py-3 rounded-lg shadow-lg">
             <div className="text-yellow-300 font-medium mb-2">실측 보정</div>
             <div className="flex items-center gap-1.5">
@@ -4456,9 +4484,163 @@ export default function MeshCropEditor({
           </div>
         )}
 
-        {toast && (
+        {vraMode && (
+          <div className="absolute top-3 right-3 bg-black/90 border border-blue-500/50 text-gray-100 text-xs px-3 py-3 rounded-lg shadow-lg w-80 max-h-[85vh] overflow-y-auto">
+            <div className="text-blue-300 font-semibold mb-2 text-sm">VRA 치수 입력</div>
+
+            {/* 캘리브레이션 */}
+            <div className="mb-3">
+              <div className="text-gray-400 mb-1">① 캘리브레이션 (두 점 클릭 후 실제 거리 입력)</div>
+              {measureDistanceRaw !== null ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    value={calibrationInput}
+                    onChange={(e) => setCalibrationInput(e.target.value)}
+                    placeholder="실제 길이"
+                    className="w-24 rounded bg-black/30 border border-gray-700 px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
+                  />
+                  <select
+                    value={calibrationUnit}
+                    onChange={(e) => setCalibrationUnit(e.target.value as 'm' | 'cm' | 'mm')}
+                    className="rounded bg-black/30 border border-gray-700 px-1.5 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="m">m</option>
+                    <option value="cm">cm</option>
+                    <option value="mm">mm</option>
+                  </select>
+                  <button
+                    onClick={() => void handleSaveCalibration()}
+                    disabled={!canSaveCalibration || calibrationSaving}
+                    className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {calibrationSaving ? '저장 중..' : '교정 저장'}
+                  </button>
+                </div>
+              ) : (
+                <div className="text-gray-500 italic">편집기에서 두 점을 클릭하세요</div>
+              )}
+              <div className="mt-1 text-[11px] text-gray-500">보정 배율: {calibrationScale.toFixed(4)}</div>
+            </div>
+
+            <div className="border-t border-gray-700 my-2" />
+
+            {/* 10곳 치수 측정 */}
+            <div className="mb-2">
+              <div className="text-gray-400 mb-1">② 치수 측정 ({vraPoints.length}/10곳)</div>
+              <div className="text-gray-500 text-[11px] mb-2">두 점 클릭 후 "측정값 추가" → 실물 치수 입력</div>
+              <button
+                onClick={() => {
+                  if (measureDistance === null) {
+                    showToast('먼저 편집기에서 두 점을 클릭하세요.', 'err');
+                    return;
+                  }
+                  if (vraPoints.length >= 10) {
+                    showToast('최대 10개까지만 입력할 수 있습니다.', 'err');
+                    return;
+                  }
+                  const measuredMm = measureDistance * 1000;
+                  setVraPoints((prev) => [...prev, { measured: measuredMm, actual: '' }]);
+                  setMeasurePts([]);
+                }}
+                disabled={measureDistance === null || vraPoints.length >= 10}
+                className="px-2 py-1 text-xs rounded bg-blue-700 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed mb-2"
+              >
+                측정값 추가 {measureDistance !== null ? `(${(measureDistance * 1000).toFixed(1)} mm)` : ''}
+              </button>
+              {vraPoints.length > 0 && (
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="text-gray-500">
+                      <th className="text-left pr-1">#</th>
+                      <th className="text-right pr-1">측정(mm)</th>
+                      <th className="text-right pr-1">실물(mm)</th>
+                      <th className="text-right pr-1">오차</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vraPoints.map((pt, i) => {
+                      const actualNum = parseFloat(pt.actual);
+                      const err = Number.isFinite(actualNum) && actualNum > 0 ? Math.abs(pt.measured - actualNum) : null;
+                      return (
+                        <tr key={i} className="border-t border-gray-800">
+                          <td className="text-gray-500 pr-1">{i + 1}</td>
+                          <td className="text-right pr-1 text-gray-300">{pt.measured.toFixed(1)}</td>
+                          <td className="text-right pr-1">
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.1"
+                              value={pt.actual}
+                              onChange={(e) =>
+                                setVraPoints((prev) => prev.map((p, j) => (j === i ? { ...p, actual: e.target.value } : p)))
+                              }
+                              className="w-16 rounded bg-black/30 border border-gray-700 px-1 py-0.5 text-right text-gray-100 focus:outline-none focus:border-blue-500"
+                            />
+                          </td>
+                          <td className="text-right pr-1">{err !== null ? <span className={err <= 15 ? 'text-green-400' : 'text-red-400'}>{err.toFixed(1)}</span> : <span className="text-gray-600">-</span>}</td>
+                          <td>
+                            <button
+                              onClick={() => setVraPoints((prev) => prev.filter((_, j) => j !== i))}
+                              className="text-gray-600 hover:text-red-400 px-1"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* VRA 결과 & 저장 */}
+            {vraPoints.length > 0 && (() => {
+              const validPts = vraPoints.filter((p) => {
+                const a = parseFloat(p.actual);
+                return Number.isFinite(a) && a > 0;
+              });
+              const vra = validPts.length > 0
+                ? validPts.reduce((sum, p) => sum + Math.abs(p.measured - parseFloat(p.actual)), 0) / validPts.length
+                : null;
+              return (
+                <div className="border-t border-gray-700 pt-2 mt-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-gray-400">평균 오차</span>
+                    <span className={`font-mono font-bold ${vra !== null ? (vra <= 15 ? 'text-green-400' : 'text-red-400') : 'text-gray-600'}`}>
+                      {vra !== null ? `${vra.toFixed(2)} mm` : '-'}
+                    </span>
+                  </div>
+                  {vra !== null && (
+                    <div className="text-[11px] text-gray-500 mb-2">목표: ≤ 15.00 mm</div>
+                  )}
+                  <button
+                    onClick={() => void handleSaveVra()}
+                    disabled={validPts.length === 0 || vraSaving}
+                    className="w-full px-2 py-1.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {vraSaving ? '저장 중..' : `VRA 저장 (${validPts.length}개 기준)`}
+                  </button>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {!vraMode && toast && (
           <div
             className={`absolute top-3 right-3 text-white text-xs px-3 py-2 rounded shadow-lg pointer-events-none ${toast.type === 'ok' ? 'bg-emerald-600' : 'bg-red-600'}`}
+          >
+            {toast.msg}
+          </div>
+        )}
+        {vraMode && toast && (
+          <div
+            className={`absolute top-3 left-3 text-white text-xs px-3 py-2 rounded shadow-lg pointer-events-none ${toast.type === 'ok' ? 'bg-emerald-600' : 'bg-red-600'}`}
           >
             {toast.msg}
           </div>

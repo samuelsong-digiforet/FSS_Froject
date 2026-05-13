@@ -21,7 +21,22 @@
       "PowerShell(docker exec fss-postgres psql -U fss_user -d fss -c \"SELECT name, type, status, preview_object, output_object FROM assets WHERE status = 'awaiting_crop';\")",
       "PowerShell(docker compose logs worker --tail=50)",
       "PowerShell(nvidia-smi)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\USER\\\\Desktop\\\\FSS\\\\FSS\\\\worker\\\\src\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(sed -i 's/async findAll\\(userId: string\\)/async findAll\\(userId: number\\)/g; *)",
+      "Bash(sed -i 's/async findOne\\(id: string\\)/async findOne\\(id: number\\)/g; *)",
+      "Bash(sed -i 's/async create\\(dto: CreateRoleDto, userId: string\\)/async create\\(dto: CreateRoleDto, userId: number\\)/g' \"c:/Users/USER/Desktop/FSS/FSS/apps/api/src/roles/roles.service.ts\")",
+      "Bash(sed -n '220,235p' \"c:/Users/USER/Desktop/FSS/FSS/apps/api/src/assets/assets.service.ts\")",
+      "Bash(sed -n '60,80p' \"c:/Users/USER/Desktop/FSS/FSS/apps/api/src/asset-categories/asset-categories.service.ts\")",
+      "Bash(sed -n '40,60p' \"c:/Users/USER/Desktop/FSS/FSS/apps/api/src/roles/roles.service.ts\")",
+      "Bash(python -c ' *)",
+      "Bash(git -C \"C:/Users/USER/Desktop/FSS/FSS\" log --oneline -10)",
+      "Bash(git -C \"C:/Users/USER/Desktop/FSS/FSS\" diff HEAD~1 HEAD -- worker/src/converter.py)",
+      "Bash(git -C \"C:/Users/USER/Desktop/FSS/FSS\" diff HEAD~1 HEAD -- apps/web/src/pages/assets/AssetsPage.tsx)",
+      "Bash(node -e \"require\\('three'\\)\")",
+      "Bash(docker restart *)"
     ]
   }
 }

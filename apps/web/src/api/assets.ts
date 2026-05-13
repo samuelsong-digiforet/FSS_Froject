@@ -4,13 +4,13 @@ export type AssetType = 'point_cloud' | 'nerf' | 'gaussian' | 'mesh';
 export type AssetStatus =
   | 'pending'
   | 'processing'
-  | 'preview_ready'
   | 'awaiting_crop'
   | 'done'
   | 'failed'
   | 'gpu_required';
 export type AssetUploadMode = 'direct' | 'convert';
 export type MeshInteropDownloadFormat = 'glb' | 'obj' | 'stl' | 'ply' | 'all';
+export type GenerationQuality = 'fast' | 'normal' | 'precise';
 
 export interface AssetObb {
   center: [number, number, number];
@@ -30,6 +30,8 @@ export interface AssetMetadata extends Record<string, unknown> {
   obbParams?: AssetObb;
   obbVersions?: AssetObbVersion[];
   representativeSceneObject?: string;
+  uploadMode?: AssetUploadMode;
+  generationQuality?: GenerationQuality;
   psnr?: number;
   ssim?: number;
   volumeRenderingAccuracy?: number;
@@ -37,6 +39,7 @@ export interface AssetMetadata extends Record<string, unknown> {
 
 export interface Asset {
   id: string;
+  uuid: string;
   name: string;
   approved: boolean;
   description?: string;
@@ -82,6 +85,7 @@ export const ASSET_TYPE_FORMATS: Record<AssetType, { exts: string[]; desc: strin
 export const assetsApi = {
   getAll: (params?: { categoryId?: number }) => api.get<Asset[]>('/assets', { params }),
   getOne: (id: string) => api.get<Asset>(`/assets/${id}`),
+  getOneByUuid: (uuid: string) => api.get<Asset>(`/assets/uuid/${uuid}`),
   create: (data: {
     name: string;
     description?: string;
@@ -104,6 +108,7 @@ export const assetsApi = {
       calibrationReferenceLength?: number;
       calibrationMeasuredLength?: number;
       representativeSceneObject?: string | null;
+      volumeRenderingAccuracy?: number;
     },
   ) => api.patch<Asset>(`/assets/${id}`, data),
   remove: (id: string) => api.delete(`/assets/${id}`),
@@ -123,6 +128,10 @@ export const assetsApi = {
       previewBounds?: number[];
     },
   ) => api.post<Asset>(`/assets/${id}/resume`, params),
+  regenerate: (id: string, qualityPreset: GenerationQuality) =>
+    api.post<Asset>(`/assets/${id}/regenerate`, { qualityPreset }),
+  clone: (id: string, qualityPreset: GenerationQuality) =>
+    api.post<Asset>(`/assets/${id}/clone`, { qualityPreset }),
   downloadMeshArtifact: (id: string, format: MeshInteropDownloadFormat) =>
     api.get<Blob>(`/assets/${id}/download`, { params: { format }, responseType: 'blob' }),
   rename: (id: string, name: string) => api.patch<Asset>(`/assets/${id}/rename`, { name }),
@@ -157,7 +166,6 @@ export const ASSET_TYPE_LABELS: Record<AssetType, string> = {
 export const ASSET_STATUS_LABELS: Record<AssetStatus, string> = {
   pending: '대기',
   processing: '처리 중',
-  preview_ready: '미리보기 준비',
   awaiting_crop: '영역 선택 대기',
   done: '완료',
   failed: '실패',
@@ -167,7 +175,6 @@ export const ASSET_STATUS_LABELS: Record<AssetStatus, string> = {
 export const ASSET_STATUS_COLORS: Record<AssetStatus, string> = {
   pending: 'bg-gray-100 text-gray-600',
   processing: 'bg-blue-100 text-blue-600',
-  preview_ready: 'bg-yellow-100 text-yellow-700',
   awaiting_crop: 'bg-orange-100 text-orange-700',
   done: 'bg-green-100 text-green-700',
   failed: 'bg-red-100 text-red-600',

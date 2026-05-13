@@ -4,22 +4,25 @@ import { Queue } from 'bullmq';
 import { CONVERSION_QUEUE } from './queue.module';
 
 export interface ConversionJobData {
-  assetId: string;
+  assetId: number;
   assetType: string;
   sourceObject: string;
   outputProfile?: string;
-  userId: string;
+  qualityPreset?: 'fast' | 'normal' | 'precise';
+  userId: number;
 }
 
 export interface Stage2JobData {
-  assetId: string;
+  assetId: number;
   assetType: string;
   colmapObject: string;
   outputProfile?: string;
+  qualityPreset?: 'fast' | 'normal' | 'precise';
   obbParams?: { center: number[]; rotation: number[]; scale: number[]; previewCenter?: number[]; previewBounds?: number[] };
-  userId: string;
+  userId: number;
   stage: 'stage2';
 }
+
 
 
 @Injectable()

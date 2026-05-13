@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, Req } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, Req, ParseIntPipe } from '@nestjs/common';
 import { ScenesService } from './scenes.service';
 import { CreateSceneDto } from './dto/create-scene.dto';
 import { UpdateSceneDto } from './dto/update-scene.dto';
@@ -16,7 +16,7 @@ export class ScenesController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string, @Req() req: { user: User }) {
+  findOne(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.scenesService.findOne(id, req.user.id);
   }
 
@@ -26,12 +26,12 @@ export class ScenesController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateSceneDto, @Req() req: { user: User }) {
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateSceneDto, @Req() req: { user: User }) {
     return this.scenesService.update(id, dto, req.user.id);
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string, @Req() req: { user: User }) {
+  remove(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.scenesService.remove(id, req.user.id);
   }
 }

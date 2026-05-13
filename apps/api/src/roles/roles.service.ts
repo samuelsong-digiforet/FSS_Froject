@@ -42,7 +42,7 @@ export class RolesService {
     return role;
   }
 
-  async create(dto: CreateRoleDto, userId: string): Promise<Role> {
+  async create(dto: CreateRoleDto, userId: number): Promise<Role> {
     const exists = await this.roleRepo.findOne({ where: { name: dto.name } });
     if (exists) throw new ConflictException('이미 존재하는 권한명입니다.');
     const role = this.roleRepo.create({ name: dto.name, createdById: userId });

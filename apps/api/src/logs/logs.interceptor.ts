@@ -25,7 +25,7 @@ export class LogsInterceptor implements NestInterceptor {
 
     if (!meta) return next.handle();
 
-    const req = context.switchToHttp().getRequest<{ user?: { id: string; username?: string; email: string; fullName: string }; ip: string; headers: Record<string, string> }>();
+    const req = context.switchToHttp().getRequest<{ user?: { id: number; username?: string; email: string; fullName: string }; ip: string; headers: Record<string, string> }>();
     const user = req.user;
     const ip = (req.headers['x-forwarded-for'] as string) ?? req.ip;
 

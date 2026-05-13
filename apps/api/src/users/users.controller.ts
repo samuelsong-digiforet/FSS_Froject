@@ -9,6 +9,7 @@ import {
   Query,
   UseGuards,
   Req,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -37,7 +38,7 @@ export class UsersController {
 
   @Get(':id')
   @Log('회원 관리', '상세 조회')
-  findOne(@Param('id') id: string) {
+  findOne(@Param('id', ParseIntPipe) id: number) {
     return this.usersService.findOne(id);
   }
 
@@ -50,7 +51,7 @@ export class UsersController {
   @Patch(':id')
   @Log('회원 관리', '수정')
   update(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateUserDto,
     @Req() req: { user: User },
   ) {
@@ -59,13 +60,13 @@ export class UsersController {
 
   @Delete(':id')
   @Log('회원 관리', '삭제')
-  remove(@Param('id') id: string) {
+  remove(@Param('id', ParseIntPipe) id: number) {
     return this.usersService.remove(id);
   }
 
   @Patch(':id/password')
   @Log('회원 관리', '비밀번호 변경')
-  changePassword(@Param('id') id: string, @Body() dto: ChangePasswordDto) {
+  changePassword(@Param('id', ParseIntPipe) id: number, @Body() dto: ChangePasswordDto) {
     return this.usersService.changePassword(id, dto);
   }
 }

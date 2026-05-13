@@ -14,9 +14,14 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  // CORS 설정 (개발 환경)
+  // CORS 설정 — CORS_ORIGIN에 콤마로 여러 주소 지정 가능
+  // 예: http://localhost:5173,http://192.168.1.100
+  const corsOrigins = (process.env.CORS_ORIGIN ?? 'http://localhost:5173')
+    .split(',')
+    .map(o => o.trim())
+    .filter(Boolean);
   app.enableCors({
-    origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+    origin: corsOrigins.length === 1 ? corsOrigins[0] : corsOrigins,
     credentials: true,
   });
 

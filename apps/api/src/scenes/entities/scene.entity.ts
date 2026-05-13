@@ -6,8 +6,8 @@ import { User } from '../../users/entities/user.entity';
 
 @Entity('scenes')
 export class Scene {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+  @PrimaryGeneratedColumn()
+  id: number;
 
   @Column()
   name: string;
@@ -23,7 +23,7 @@ export class Scene {
   user: User;
 
   @Column({ name: 'user_id' })
-  userId: string;
+  userId: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -6,7 +6,7 @@ export class Log {
   id: number;
 
   @Column({ nullable: true })
-  userId: string;
+  userId: number;
 
   @Column({ nullable: true })
   username: string;

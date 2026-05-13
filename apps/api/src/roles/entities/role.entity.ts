@@ -21,7 +21,7 @@ export class Role {
   createdBy: User;
 
   @Column({ name: 'created_by', nullable: true })
-  createdById: string;
+  createdById: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

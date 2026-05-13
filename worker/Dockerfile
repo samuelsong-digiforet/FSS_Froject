@@ -35,6 +35,11 @@ RUN pip install --no-cache-dir \
 # NerfStudio (3DGS splatfacto + nerfacto 포함)
 RUN pip install --no-cache-dir nerfstudio==1.1.4
 
+# Opacity Entropy Loss 패치 적용
+COPY patches/splatfacto_opacity_entropy.patch .
+RUN patch /usr/local/lib/python3.10/dist-packages/nerfstudio/models/splatfacto.py \
+    splatfacto_opacity_entropy.patch
+
 # gsplat (3DGS 학습 엔진) - CUDA 빌드 필요
 RUN pip install --no-cache-dir gsplat==1.3.0
 

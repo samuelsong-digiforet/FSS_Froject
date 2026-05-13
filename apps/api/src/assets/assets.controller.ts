@@ -10,11 +10,13 @@ import {
   UseGuards,
   Req,
   Res,
+  ParseIntPipe,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { AssetsService } from './assets.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { CreateAssetObbVersionDto } from './dto/create-asset-obb-version.dto';
+import { RegenerateAssetDto } from './dto/regenerate-asset.dto';
 import { UpdateAssetObbVersionDto } from './dto/update-asset-obb-version.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -38,22 +40,28 @@ export class AssetsController {
     return this.assetsService.findAll(req.user.id, categoryId ? Number(categoryId) : undefined);
   }
 
+  @Get('uuid/:uuid')
+  @Log('에셋 관리', 'UUID 상세 조회')
+  findOneByUuid(@Param('uuid') uuid: string, @Req() req: { user: User }) {
+    return this.assetsService.findOneByUuid(uuid, req.user.id);
+  }
+
   @Get(':id')
   @Log('에셋 관리', '상세 조회')
-  findOne(@Param('id') id: string, @Req() req: { user: User }) {
+  findOne(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.assetsService.findOne(id, req.user.id);
   }
 
   @Get(':id/versions')
   @Log('에셋 관리', '버전 목록 조회')
-  getObbVersions(@Param('id') id: string, @Req() req: { user: User }) {
+  getObbVersions(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.assetsService.getObbVersions(id, req.user.id);
   }
 
   @Patch(':id')
   @Log('에셋 관리', '수정')
   update(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateAssetDto,
     @Req() req: { user: User },
   ) {
@@ -63,7 +71,7 @@ export class AssetsController {
   @Post(':id/versions')
   @Log('에셋 관리', '버전 저장')
   createObbVersion(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() dto: CreateAssetObbVersionDto,
     @Req() req: { user: User },
   ) {
@@ -73,7 +81,7 @@ export class AssetsController {
   @Patch(':id/versions/:versionId')
   @Log('Asset Management', 'Update OBB Version')
   updateObbVersion(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Param('versionId') versionId: string,
     @Body() dto: UpdateAssetObbVersionDto,
     @Req() req: { user: User },
@@ -84,7 +92,7 @@ export class AssetsController {
   @Delete(':id/versions/:versionId')
   @Log('Asset Management', 'Delete OBB Version')
   removeObbVersion(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Param('versionId') versionId: string,
     @Req() req: { user: User },
   ) {
@@ -94,7 +102,7 @@ export class AssetsController {
   @Patch(':id/rename')
   @Log('에셋 관리', '이름 변경')
   rename(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() body: { name: string },
     @Req() req: { user: User },
   ) {
@@ -104,7 +112,7 @@ export class AssetsController {
   @Patch(':id/approval')
   @Log('에셋 관리', '승인 토글')
   toggleApproval(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Req() req: { user: User },
   ) {
     return this.assetsService.toggleApproval(id, req.user.id);
@@ -113,16 +121,36 @@ export class AssetsController {
   @Post(':id/resume')
   @Log('에셋 관리', 'Stage2 재개')
   resumeStage2(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Body() body: { obbCenter?: number[]; obbRotation?: number[]; obbScale?: number[]; previewCenter?: number[]; previewBounds?: number[] },
     @Req() req: { user: User },
   ) {
     return this.assetsService.resumeStage2(id, req.user.id, body);
   }
 
+  @Post(':id/regenerate')
+  @Log('Asset Management', 'Regenerate Asset Quality')
+  regenerate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RegenerateAssetDto,
+    @Req() req: { user: User },
+  ) {
+    return this.assetsService.regenerate(id, req.user.id, dto.qualityPreset);
+  }
+
+  @Post(':id/clone')
+  @Log('에셋 관리', '품질 복사본 생성')
+  cloneWithQuality(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RegenerateAssetDto,
+    @Req() req: { user: User },
+  ) {
+    return this.assetsService.cloneWithQuality(id, req.user.id, dto.qualityPreset);
+  }
+
   @Get(':id/nerf-frames')
   @Log('에셋 관리', 'NeRF 프레임 목록')
-  getNerfFrames(@Param('id') id: string, @Req() req: { user: User }) {
+  getNerfFrames(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.assetsService.getNerfFramePaths(id, req.user.id).then((paths) => ({
       count: paths.length,
       paths,
@@ -132,7 +160,7 @@ export class AssetsController {
   @Get(':id/nerf-frame')
   @Log('에셋 관리', 'NeRF 프레임 스트리밍')
   async getNerfFrame(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Query('path') framePath: string,
     @Req() req: { user: User },
     @Res() res: Response,
@@ -143,7 +171,7 @@ export class AssetsController {
   @Get(':id/download')
   @Log('Asset Management', 'Download Output Artifact')
   async downloadArtifact(
-    @Param('id') id: string,
+    @Param('id', ParseIntPipe) id: number,
     @Query('format') format: string,
     @Req() req: { user: User },
     @Res() res: Response,
@@ -153,7 +181,7 @@ export class AssetsController {
 
   @Delete(':id')
   @Log('에셋 관리', '삭제')
-  remove(@Param('id') id: string, @Req() req: { user: User }) {
+  remove(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
     return this.assetsService.remove(id, req.user.id);
   }
 }

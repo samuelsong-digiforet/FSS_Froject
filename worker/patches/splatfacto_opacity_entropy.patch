@@ -1,0 +1,28 @@
+--- a/splatfacto.py
++++ b/splatfacto.py
+@@ -211,5 +211,8 @@ class SplatfactoModelConfig(ModelConfig):
+     color_corrected_metrics: bool = False
+     """If True, apply color correction to the rendered images before computing the metrics."""
++    opacity_loss_mult: float = 0.0
++    """Weight of opacity entropy loss. Encourages opacities toward 0 or 1, enabling cleaner Gaussian culling.
++    Set > 0 (e.g. 0.01) during an opacity-refinement phase to remove low-quality Gaussians."""
+
+
+ class SplatfactoModel(Model):
+@@ -949,8 +952,16 @@ class SplatfactoModel(Model):
+         loss_dict = {
+             "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
+             "scale_reg": scale_reg,
+         }
+
++        if self.config.opacity_loss_mult > 0.0:
++            opacities = torch.sigmoid(self.opacities)
++            opacity_entropy = -(
++                opacities * torch.log(opacities + 1e-10)
++                + (1 - opacities) * torch.log(1 - opacities + 1e-10)
++            ).mean()
++            loss_dict["opacity_entropy"] = self.config.opacity_loss_mult * opacity_entropy
++
+         if self.training:
+             # Add loss from camera optimizer
+             self.camera_optimizer.get_loss_dict(loss_dict)

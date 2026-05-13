@@ -6,7 +6,7 @@ import time
 import redis
 from storage import download_object, upload_object
 from converter import preprocess_to_fly, convert_from_processed, convert_asset
-from database import update_asset_status, update_asset_progress, update_preview_object, update_awaiting_crop, is_asset_deleted, update_texture_objects, update_quality_metrics, AssetDeletedException
+from database import update_asset_status, update_asset_progress, update_awaiting_crop, is_asset_deleted, update_texture_objects, update_quality_metrics, merge_asset_metadata, AssetDeletedException
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -240,174 +240,6 @@ def _compute_ply_preview_stats(ply_path: str):
         return None
 
 
-def process_job(job_id: str, data: dict) -> str:
-    asset_id   = data.get("assetId")
-    asset_type = data.get("assetType")
-    source_obj = data.get("sourceObject")
-
-    print(f"[Worker] Processing job {job_id} — asset: {asset_id}, type: {asset_type}")
-
-    def on_progress(pct: int):
-        update_asset_progress(asset_id, pct)
-        print(f"[Worker] Job {job_id} progress: {pct}%")
-
-    def stop_check() -> bool:
-        return is_asset_deleted(asset_id)
-
-    # ── 미리보기 재생성 job: status 변경 없이 바로 처리 ─────────────
-    if data.get("stage") == "regenerate_preview":
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _run_regenerate_preview(asset_id, data, tmpdir)
-        print(f"[Worker] Job {job_id} regenerate_preview done")
-        return data.get("outputObject", "")
-
-    update_asset_status(asset_id, "processing", progress=0)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-
-        metrics: dict = {}
-
-        # ── Stage2 전용 job (colmapObject 다운로드 → 풀 트레이닝) ─
-        if data.get("stage") == "stage2":
-            on_progress(55)
-            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics)
-        else:
-            # ── 원본 파일 다운로드 ──────────────────────────────────
-            ext = os.path.splitext(source_obj)[-1].lower()
-            input_path = os.path.join(tmpdir, f"input{ext}")
-            on_progress(5)
-            download_object(source_obj, input_path)
-            on_progress(10)
-
-            # ── 2단계 파이프라인 (gaussian/nerf/mesh/point_cloud + ZIP/영상) ─
-            if asset_type in TWO_STAGE_TYPES and ext in TWO_STAGE_EXTS:
-                gpu_ok, gpu_msg = check_gpu_requirements(asset_type)
-                if not gpu_ok:
-                    update_asset_status(asset_id, "gpu_required", error_message=gpu_msg)
-                    raise GpuRequiredException(gpu_msg)
-                output_object = _run_two_stage(
-                    asset_id, asset_type, input_path, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics,
-                )
-            else:
-                # ── 단일 단계 (직접 파일 변환) ─────────────────────
-                output_dir  = os.path.join(tmpdir, "output")
-                output_path = convert_asset(asset_type, input_path, output_dir, on_progress)
-                output_object = _upload_output(asset_id, output_path)
-                # CAD ZIP 결과인 경우 GLB를 previewObject로 업로드
-                if output_path.endswith(".zip"):
-                    _upload_glb_preview_from_zip(asset_id, output_path, tmpdir)
-                if asset_type == "mesh" and output_path.endswith(".zip"):
-                    tex = _upload_textures_from_zip(asset_id, output_path, tmpdir)
-                    if tex:
-                        update_texture_objects(asset_id, tex)
-
-    update_asset_status(asset_id, "done", output_object=output_object)
-    if metrics:
-        update_quality_metrics(asset_id, metrics)
-        print(f"[Worker] Job {job_id} quality metrics saved: {metrics}")
-    print(f"[Worker] Job {job_id} done — output: {output_object}")
-    return output_object
-
-
-def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
-    """
-    1단계: COLMAP + 빠른 splatfacto → fly PLY → previewObject
-    2단계: COLMAP 결과 재사용 → 풀 트레이닝 → outputObject
-    mesh 타입은 1단계 후 AwaitingCropException 발생 → 사용자가 영역 지정 후 stage2 job으로 재개
-    """
-    # ── 1단계 ────────────────────────────────────────────────────
-    print(f"[Worker][Stage1] 전처리 + fly file 생성 시작")
-    fly_path, processed_dir = preprocess_to_fly(input_path, tmpdir, on_progress, stop_check=stop_check)
-
-    if fly_path and os.path.exists(fly_path):
-        preview_object = f"previews/{asset_id}/fly.ply"
-        upload_object(fly_path, preview_object, "application/octet-stream")
-        update_preview_object(asset_id, preview_object)
-        print(f"[Worker][Stage1] fly file 업로드 완료 → {preview_object}")
-    else:
-        print(f"[Worker][Stage1] fly file 생성 실패 — 2단계 계속 진행")
-
-    on_progress(55)
-
-    # ── mesh 타입: COLMAP 결과를 MinIO에 보존 후 사용자 영역 선택 대기 ──
-    if asset_type in {"mesh", "gaussian"}:
-        if not (processed_dir and os.path.isdir(processed_dir)):
-            raise RuntimeError(
-                "COLMAP 전처리 실패로 메시 변환을 완료할 수 없습니다. "
-                "COLMAP 및 nerfstudio 설치 상태와 GPU 환경을 확인하세요."
-            )
-        print(f"[Worker][Stage1] COLMAP 결과 tarball 업로드 중...")
-        tar_path = _tar_directory(processed_dir, tmpdir, "colmap.tar.gz")
-        colmap_object = f"colmap/{asset_id}/processed.tar"
-        preview_stats = _compute_ply_preview_stats(fly_path) if fly_path and os.path.exists(fly_path) else None
-        preview_center = preview_stats["center"] if preview_stats else None
-        preview_bounds = preview_stats["bounds"] if preview_stats else None
-        upload_object(tar_path, colmap_object, "application/x-tar")
-        update_awaiting_crop(asset_id, colmap_object, preview_center, preview_bounds)
-        print(f"[Worker][Stage1] COLMAP tarball 업로드 완료 → {colmap_object}")
-        raise AwaitingCropException(f"Asset {asset_id}: 영역 선택 대기 중")
-
-    # ── 2단계 ────────────────────────────────────────────────────
-    if processed_dir and os.path.isdir(processed_dir):
-        print(f"[Worker][Stage2] COLMAP 결과 재사용 → 풀 트레이닝")
-        output_dir  = os.path.join(tmpdir, "output")
-        output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, stop_check=stop_check, metrics_out=metrics_out)
-    else:
-        raise RuntimeError(
-            f"COLMAP 전처리 실패로 '{asset_type}' 변환을 완료할 수 없습니다. "
-            "COLMAP 및 nerfstudio 설치 상태와 GPU 환경을 확인하세요."
-        )
-
-    return _upload_output(asset_id, output_path)
-
-
-def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
-    """사용자 영역 선택 후 Stage 2 재개 (COLMAP tarball 다운로드 → 풀 트레이닝)"""
-    import tarfile as tarfile_mod
-
-    colmap_object = data.get("colmapObject")
-    obb_params    = data.get("obbParams")  # {center, rotation, scale} or None
-
-    print(f"[Worker][Stage2] COLMAP tarball 다운로드: {colmap_object}")
-    tar_ext = ".tar" if (colmap_object or "").endswith(".tar") else ".tar.gz"
-    tar_path = os.path.join(tmpdir, f"colmap{tar_ext}")
-    download_object(colmap_object, tar_path)
-
-    print(f"[Worker][Stage2] tarball 압축 해제 중...")
-    with tarfile_mod.open(tar_path, "r:*") as tar:
-        tar.extractall(tmpdir)
-
-    # tar 내 최상위 디렉터리 탐색 ("processed" 또는 디렉터리명)
-    processed_dir = os.path.join(tmpdir, "processed")
-    if not os.path.isdir(processed_dir):
-        # 압축 해제된 첫 번째 디렉터리 사용
-        entries = [e for e in os.listdir(tmpdir) if os.path.isdir(os.path.join(tmpdir, e)) and e != "__MACOSX"]
-        if entries:
-            processed_dir = os.path.join(tmpdir, entries[0])
-
-    if not os.path.isdir(processed_dir):
-        raise RuntimeError("COLMAP tarball 압축 해제 후 processed 디렉터리를 찾을 수 없습니다")
-
-    on_progress(60)
-    print(f"[Worker][Stage2] 풀 트레이닝 시작 (processed_dir={processed_dir}, obb={obb_params})")
-
-    output_dir  = os.path.join(tmpdir, "output")
-    output_path = convert_from_processed(asset_type, processed_dir, output_dir, on_progress, obb_params=obb_params, stop_check=stop_check, metrics_out=metrics_out)
-
-    output_object = _upload_output(asset_id, output_path)
-
-    # mesh ZIP 결과인 경우에만 GLB 미리보기 생성 → previewObject 갱신
-    # nerf ZIP은 MP4+PNG 구성이므로 GLB 변환 불필요
-    if output_path.endswith(".zip") and asset_type != "nerf":
-        _upload_glb_preview_from_zip(asset_id, output_path, tmpdir)
-    if asset_type == "mesh" and output_path.endswith(".zip"):
-        tex = _upload_textures_from_zip(asset_id, output_path, tmpdir)
-        if tex:
-            update_texture_objects(asset_id, tex)
-
-    return output_object
-
-
 def _run_regenerate_preview(asset_id: str, data: dict, tmpdir: str):
     """기존 ZIP outputObject에서 GLB 미리보기를 재생성하여 previewObject 갱신"""
     import zipfile
@@ -481,6 +313,20 @@ def _upload_glb_preview_from_zip(asset_id: str, zip_path: str, tmpdir: str):
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(preview_dir)
 
+        glb_path = os.path.join(tmpdir, "preview.glb")
+
+        # GLB는 texture가 임베드되어 있으므로 최우선 사용
+        glb_files = glob_module.glob(os.path.join(preview_dir, "*.glb"))
+        if glb_files:
+            import shutil as _shutil
+            _shutil.copy(glb_files[0], glb_path)
+            print(f"[Worker] ZIP 내 GLB 발견, 직접 사용: {os.path.basename(glb_files[0])}")
+            preview_object = f"previews/{asset_id}/output.glb"
+            upload_object(glb_path, preview_object, "model/gltf-binary")
+            _update_preview_object_keep_status(asset_id, preview_object)
+            print(f"[Worker] GLB 미리보기 업로드 완료 → {preview_object}")
+            return
+
         obj_files = glob_module.glob(os.path.join(preview_dir, "*.obj"))
         ply_files = glob_module.glob(os.path.join(preview_dir, "*.ply"))
 
@@ -492,10 +338,9 @@ def _upload_glb_preview_from_zip(asset_id: str, zip_path: str, tmpdir: str):
             source_file = ply_files[0]
             print(f"[Worker] ZIP 내 PLY 발견 (OBJ 없음): {os.path.basename(source_file)}")
         else:
-            print("[Worker] ZIP 내 OBJ/PLY 파일 없음 — GLB 미리보기 건너뜀")
+            print("[Worker] ZIP 내 GLB/OBJ/PLY 파일 없음 — GLB 미리보기 건너뜀")
             return
 
-        glb_path = os.path.join(tmpdir, "preview.glb")
         try:
             scene = trimesh.load(source_file, force="scene")
             scene.export(glb_path)
@@ -585,9 +430,11 @@ def main():
 
     while True:
         try:
-            job_id = r.brpoplpush(wait_key, active_key, timeout=5)
-            if not job_id:
+            result = r.blpop(wait_key, timeout=5)
+            if not result:
                 continue
+            _, job_id = result
+            r.lpush(active_key, job_id)
 
             print(f"[Worker] Got job ID: {job_id}")
 
@@ -611,12 +458,16 @@ def main():
             except AwaitingCropException as crop_err:
                 # 정상 흐름: 사용자 영역 선택 대기 (실패 아님)
                 print(f"[Worker] {crop_err}")
+                if asset_id:
+                    update_asset_status(asset_id, "awaiting_crop")
                 r.lrem(active_key, 1, job_id)
                 r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "awaiting_crop"}), "finishedOn": int(time.time() * 1000)})
                 continue
             except GpuRequiredException as gpu_err:
                 # GPU 사양 미달: gpu_required 상태로 종료 (실패 아님)
                 print(f"[Worker] GPU 요구사항 미달 — job {job_id} 중단")
+                if asset_id:
+                    update_asset_status(asset_id, "gpu_required")
                 r.lrem(active_key, 1, job_id)
                 r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "gpu_required"}), "finishedOn": int(time.time() * 1000)})
                 continue
@@ -654,8 +505,9 @@ def process_job(job_id: str, data: dict) -> str:
     asset_type = data.get("assetType")
     source_obj = data.get("sourceObject")
     output_profile = data.get("outputProfile")
+    quality_preset = data.get("qualityPreset", "fast")
 
-    print(f"[Worker] Processing job {job_id} -- asset: {asset_id}, type: {asset_type}, profile: {output_profile}")
+    print(f"[Worker] Processing job {job_id} -- asset: {asset_id}, type: {asset_type}, profile: {output_profile}, quality: {quality_preset}")
 
     def on_progress(pct: int):
         update_asset_progress(asset_id, pct)
@@ -677,7 +529,7 @@ def process_job(job_id: str, data: dict) -> str:
 
         if data.get("stage") == "stage2":
             on_progress(55)
-            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics)
+            output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics, quality_preset=quality_preset)
         else:
             ext = os.path.splitext(source_obj)[-1].lower()
             input_path = os.path.join(tmpdir, f"input{ext}")
@@ -693,6 +545,7 @@ def process_job(job_id: str, data: dict) -> str:
                     tmpdir,
                     on_progress,
                     output_profile=output_profile,
+                    quality_preset=quality_preset,
                     stop_check=stop_check,
                     metrics_out=metrics,
                 )
@@ -704,6 +557,7 @@ def process_job(job_id: str, data: dict) -> str:
                     output_dir,
                     on_progress,
                     output_profile=output_profile,
+                    quality_preset=quality_preset,
                 )
                 output_object = _upload_output(asset_id, output_path)
                 if output_path.endswith(".zip"):
@@ -721,55 +575,61 @@ def process_job(job_id: str, data: dict) -> str:
     return output_object
 
 
-def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, output_profile: str | None = None, stop_check=None, metrics_out: dict | None = None) -> str:
+def _run_two_stage(asset_id: str, asset_type: str, input_path: str, tmpdir: str, on_progress, output_profile: str | None = None, quality_preset: str = "fast", stop_check=None, metrics_out: dict | None = None) -> str:
     print("[Worker][Stage1] starting preprocess + preview generation")
     fly_path, processed_dir = preprocess_to_fly(input_path, tmpdir, on_progress, stop_check=stop_check)
 
     if fly_path and os.path.exists(fly_path):
         preview_object = f"previews/{asset_id}/fly.ply"
         upload_object(fly_path, preview_object, "application/octet-stream")
-        update_preview_object(asset_id, preview_object)
+        _update_preview_object_keep_status(asset_id, preview_object)
         print(f"[Worker][Stage1] preview uploaded -> {preview_object}")
     else:
         print("[Worker][Stage1] preview generation failed, continuing to stage 2")
 
     on_progress(55)
 
-    if asset_type in {"mesh", "gaussian"}:
-        if not (processed_dir and os.path.isdir(processed_dir)):
-            raise RuntimeError(
-                f"COLMAP preprocess failed, so {asset_type} conversion cannot continue. Check COLMAP / NerfStudio setup."
-            )
-        tar_path = _tar_directory(processed_dir, tmpdir, "colmap.tar.gz")
-        colmap_object = f"colmap/{asset_id}/processed.tar"
-        preview_stats = _compute_ply_preview_stats(fly_path) if fly_path and os.path.exists(fly_path) else None
-        preview_center = preview_stats["center"] if preview_stats else None
-        preview_bounds = preview_stats["bounds"] if preview_stats else None
-        upload_object(tar_path, colmap_object, "application/x-tar")
-        update_awaiting_crop(asset_id, colmap_object, preview_center, preview_bounds)
-        print(f"[Worker][Stage1] stage2 input uploaded -> {colmap_object}")
-        raise AwaitingCropException(f"Asset {asset_id}: awaiting crop selection")
-
-    if processed_dir and os.path.isdir(processed_dir):
-        output_dir = os.path.join(tmpdir, "output")
-        output_path = convert_from_processed(
-            asset_type,
-            processed_dir,
-            output_dir,
-            on_progress,
-            output_profile=output_profile,
-            stop_check=stop_check,
-            metrics_out=metrics_out,
-        )
-    else:
+    if not (processed_dir and os.path.isdir(processed_dir)):
         raise RuntimeError(
             f"COLMAP preprocess failed, so '{asset_type}' conversion cannot continue. Check COLMAP / NerfStudio setup."
         )
 
+    tar_path = _tar_directory(processed_dir, tmpdir, "colmap.tar.gz")
+    colmap_object = f"colmap/{asset_id}/processed.tar"
+    preview_stats = _compute_ply_preview_stats(fly_path) if fly_path and os.path.exists(fly_path) else None
+    preview_center = preview_stats["center"] if preview_stats else None
+    preview_bounds = preview_stats["bounds"] if preview_stats else None
+    upload_object(tar_path, colmap_object, "application/x-tar")
+
+    if asset_type in {"mesh"}:
+        update_awaiting_crop(asset_id, colmap_object, preview_center, preview_bounds)
+        print(f"[Worker][Stage1] stage2 input uploaded -> {colmap_object}")
+        raise AwaitingCropException(f"Asset {asset_id}: awaiting crop selection")
+
+    metadata = {"colmapObject": colmap_object}
+    if preview_center is not None:
+        metadata["previewCenter"] = preview_center
+    if preview_bounds is not None:
+        metadata["previewBounds"] = preview_bounds
+    merge_asset_metadata(asset_id, metadata)
+    print(f"[Worker][Stage1] stage2 input uploaded -> {colmap_object}")
+
+    output_dir = os.path.join(tmpdir, "output")
+    output_path = convert_from_processed(
+        asset_type,
+        processed_dir,
+        output_dir,
+        on_progress,
+        output_profile=output_profile,
+        quality_preset=quality_preset,
+        stop_check=stop_check,
+        metrics_out=metrics_out,
+    )
+
     return _upload_output(asset_id, output_path)
 
 
-def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None) -> str:
+def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_progress, stop_check=None, metrics_out: dict | None = None, quality_preset: str = "fast") -> str:
     import tarfile as tarfile_mod
 
     colmap_object = data.get("colmapObject")
@@ -802,6 +662,7 @@ def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_prog
         on_progress,
         output_profile=output_profile,
         obb_params=obb_params,
+        quality_preset=quality_preset,
         stop_check=stop_check,
         metrics_out=metrics_out,
     )

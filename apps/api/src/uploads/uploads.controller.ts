@@ -56,10 +56,12 @@ export class UploadsController {
   )
   async uploadFile(@UploadedFile() file: Express.Multer.File) {
     if (!file) throw new BadRequestException('파일이 없습니다.');
-    const objectName = `uploads/${uuidv4()}/${file.originalname}`;
+    // multer가 originalname을 Latin-1로 잘못 디코딩하므로 UTF-8로 재해석
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    const objectName = `uploads/${uuidv4()}/${originalName}`;
     await this.storage.upload(objectName, file.buffer, file.mimetype);
     const url = await this.storage.getPresignedUrl(objectName);
-    return { objectName, originalName: file.originalname, size: file.size, mimetype: file.mimetype, url };
+    return { objectName, originalName, size: file.size, mimetype: file.mimetype, url };
   }
 
   // 파일 직접 스트리밍 (CORS 없이 브라우저에서 바로 접근)
@@ -91,6 +93,11 @@ export class UploadsController {
     const contentType = mimeMap[ext] ?? 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'public, max-age=3600');
+    const filename = path.basename(objectName);
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    );
     const stat = await this.storage.statObject(objectName);
     if (stat?.size) res.setHeader('Content-Length', stat.size);
     const stream = await this.storage.getObjectStream(objectName);

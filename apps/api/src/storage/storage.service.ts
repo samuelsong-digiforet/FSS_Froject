@@ -54,8 +54,8 @@ export class StorageService implements OnModuleInit {
   // 다운로드용 임시 URL 생성 (1시간 유효)
   async getPresignedUrl(objectName: string): Promise<string> {
     const url = await this.client.presignedGetObject(this.bucket, objectName, 60 * 60);
-    // Docker 내부 호스트명을 브라우저에서 접근 가능한 주소로 교체
-    return url.replace('http://minio:9000', 'http://localhost:9000');
+    const publicUrl = this.config.get<string>('MINIO_PUBLIC_URL') ?? 'http://localhost:9000';
+    return url.replace('http://minio:9000', publicUrl);
   }
 
   // 파일 메타데이터 반환 (크기 등)

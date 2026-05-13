@@ -25,14 +25,14 @@ export class AssetCategory {
   createdBy: User;
 
   @Column({ name: 'created_by', nullable: true })
-  createdById: string;
+  createdById: number;
 
   @ManyToOne(() => User, { nullable: true, eager: false })
   @JoinColumn({ name: 'updated_by' })
   updatedBy: User;
 
   @Column({ name: 'updated_by', nullable: true })
-  updatedById: string;
+  updatedById: number;
 
   @Column({ name: 'is_active', default: true })
   isActive: boolean;

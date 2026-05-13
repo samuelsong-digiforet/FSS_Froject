@@ -56,4 +56,9 @@ export class UpdateAssetDto {
   @ValidateIf((_, v) => v !== null)
   @IsString()
   representativeSceneObject?: string | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Type(() => Number)
+  volumeRenderingAccuracy?: number;
 }

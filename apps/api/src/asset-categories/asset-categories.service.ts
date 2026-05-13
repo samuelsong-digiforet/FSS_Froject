@@ -58,14 +58,14 @@ export class AssetCategoriesService {
     return cat;
   }
 
-  async create(dto: CreateAssetCategoryDto, userId: string): Promise<AssetCategory> {
+  async create(dto: CreateAssetCategoryDto, userId: number): Promise<AssetCategory> {
     const exists = await this.categoryRepo.findOne({ where: { name: dto.name } });
     if (exists) throw new ConflictException('이미 존재하는 카테고리명입니다.');
     const cat = this.categoryRepo.create({ ...dto, createdById: userId });
     return this.categoryRepo.save(cat);
   }
 
-  async update(id: number, dto: UpdateAssetCategoryDto, userId: string): Promise<AssetCategory> {
+  async update(id: number, dto: UpdateAssetCategoryDto, userId: number): Promise<AssetCategory> {
     const cat = await this.findOne(id);
     if (dto.name && dto.name !== cat.name) {
       const exists = await this.categoryRepo.findOne({ where: { name: dto.name } });

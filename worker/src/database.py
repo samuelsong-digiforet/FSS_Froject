@@ -11,18 +11,6 @@ def get_connection():
         password=os.getenv("DB_PASS", "fss_secret_2024"),
     )
 
-def update_preview_object(asset_id: str, preview_object: str):
-    """1단계 fly file 완성 후 previewObject 저장 및 status → preview_ready"""
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE assets SET preview_object = %s, status = 'preview_ready', updated_at = NOW() WHERE id = %s",
-                (preview_object, asset_id),
-            )
-        conn.commit()
-    finally:
-        conn.close()
 
 def update_asset_status(asset_id: str, status: str, output_object: str = None, error_message: str = None, progress: int = None):
     conn = get_connection()
@@ -120,9 +108,9 @@ def update_texture_objects(asset_id: str, texture_objects: list):
         conn.close()
 
 
-def update_quality_metrics(asset_id: str, metrics: dict):
-    """PSNR, SSIM 등 품질 지표를 metadata에 저장"""
-    if not metrics:
+def merge_asset_metadata(asset_id: str, metadata: dict):
+    """Merge arbitrary values into metadata jsonb."""
+    if not metadata:
         return
     conn = get_connection()
     try:
@@ -132,11 +120,16 @@ def update_quality_metrics(asset_id: str, metrics: dict):
                    SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
                        updated_at = NOW()
                    WHERE id = %s""",
-                (json.dumps(metrics), asset_id),
+                (json.dumps(metadata), asset_id),
             )
         conn.commit()
     finally:
         conn.close()
+
+
+def update_quality_metrics(asset_id: str, metrics: dict):
+    """PSNR, SSIM 등 품질 지표를 metadata에 저장"""
+    merge_asset_metadata(asset_id, metrics)
 
 
 class AssetDeletedException(Exception):

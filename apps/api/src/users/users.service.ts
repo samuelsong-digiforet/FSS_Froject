@@ -59,7 +59,7 @@ export class UsersService {
     return { total, items };
   }
 
-  async findOne(id: string): Promise<User> {
+  async findOne(id: number): Promise<User> {
     const user = await this.userRepo.findOne({
       where: { id, isActive: true },
       relations: ['createdBy', 'updatedBy'],
@@ -68,7 +68,7 @@ export class UsersService {
     return user;
   }
 
-  async create(dto: CreateUserDto, creatorId: string): Promise<User> {
+  async create(dto: CreateUserDto, creatorId: number): Promise<User> {
     const exists = await this.userRepo.findOne({ where: { username: dto.username } });
     if (exists) throw new ConflictException('이미 사용 중인 아이디입니다.');
 
@@ -84,20 +84,20 @@ export class UsersService {
     return this.userRepo.save(user);
   }
 
-  async update(id: string, dto: UpdateUserDto, updaterId: string): Promise<User> {
+  async update(id: number, dto: UpdateUserDto, updaterId: number): Promise<User> {
     const user = await this.findOne(id);
     Object.assign(user, dto);
     user.updatedById = updaterId;
     return this.userRepo.save(user);
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: number): Promise<void> {
     const user = await this.findOne(id);
     user.isActive = false; // 소프트 딜리트
     await this.userRepo.save(user);
   }
 
-  async changePassword(id: string, dto: ChangePasswordDto): Promise<void> {
+  async changePassword(id: number, dto: ChangePasswordDto): Promise<void> {
     const user = await this.userRepo.findOne({ where: { id } });
     if (!user) throw new NotFoundException('회원을 찾을 수 없습니다.');
 

@@ -12,25 +12,25 @@ export class ScenesService {
     private readonly sceneRepo: Repository<Scene>,
   ) {}
 
-  async findAll(userId: string): Promise<Scene[]> {
+  async findAll(userId: number): Promise<Scene[]> {
     return this.sceneRepo.find({
       where: { userId },
       order: { updatedAt: 'DESC' },
     });
   }
 
-  async findOne(id: string, userId: string): Promise<Scene> {
+  async findOne(id: number, userId: number): Promise<Scene> {
     const scene = await this.sceneRepo.findOne({ where: { id, userId } });
     if (!scene) throw new NotFoundException('씬을 찾을 수 없습니다.');
     return scene;
   }
 
-  async create(dto: CreateSceneDto, userId: string): Promise<Scene> {
+  async create(dto: CreateSceneDto, userId: number): Promise<Scene> {
     const scene = this.sceneRepo.create({ ...dto, userId });
     return this.sceneRepo.save(scene);
   }
 
-  async update(id: string, dto: UpdateSceneDto, userId: string): Promise<Scene> {
+  async update(id: number, dto: UpdateSceneDto, userId: number): Promise<Scene> {
     const scene = await this.sceneRepo.findOne({ where: { id } });
     if (!scene) throw new NotFoundException('씬을 찾을 수 없습니다.');
     if (scene.userId !== userId) throw new ForbiddenException();
@@ -38,7 +38,7 @@ export class ScenesService {
     return this.sceneRepo.save(scene);
   }
 
-  async remove(id: string, userId: string): Promise<void> {
+  async remove(id: number, userId: number): Promise<void> {
     const scene = await this.sceneRepo.findOne({ where: { id, userId } });
     if (!scene) throw new NotFoundException('씬을 찾을 수 없습니다.');
     await this.sceneRepo.remove(scene);

@@ -1,16 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Between, ILike, Repository } from 'typeorm';
 import { Log } from './log.entity';
 
 export interface RecordLogDto {
-  userId?: string;
+  userId?: number;
   username?: string;
   fullName?: string;
   ip?: string;
   device?: string;
   menuName?: string;
   action?: string;
+}
+
+export interface FindAllLogsDto {
+  search?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  limit?: number;
 }
 
 @Injectable()
@@ -24,7 +32,34 @@ export class LogsService {
     await this.logRepo.save(this.logRepo.create(dto));
   }
 
-  findAll() {
-    return this.logRepo.find({ order: { createdAt: 'DESC' } });
+  async findAll(dto: FindAllLogsDto = {}) {
+    const { search, startDate, endDate, page = 1, limit = 20 } = dto;
+
+    const qb = this.logRepo.createQueryBuilder('log');
+
+    if (search) {
+      qb.andWhere(
+        '(log.username ILIKE :search OR log.fullName ILIKE :search OR log.menuName ILIKE :search OR log.action ILIKE :search)',
+        { search: `%${search}%` },
+      );
+    }
+
+    if (startDate) {
+      qb.andWhere('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+    }
+
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      qb.andWhere('log.createdAt <= :endDate', { endDate: end });
+    }
+
+    qb.orderBy('log.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [data, total] = await qb.getManyAndCount();
+
+    return { data, total, page, limit };
   }
 }
