@@ -34,24 +34,6 @@ const MENU_STRUCTURE: MenuGroup[] = [
     ],
   },
   {
-    group: '트윈 스튜디오',
-    items: [
-      {
-        menuKey: 'studio',
-        label: '트윈 스튜디오',
-        actions: [
-          { key: 'use',    label: '사용 여부' },
-          { key: 'view',   label: '조회 (검색)' },
-          { key: 'detail', label: '상세 정보' },
-          { key: 'create', label: '생성' },
-          { key: 'update', label: '수정' },
-          { key: 'delete', label: '삭제' },
-          { key: 'editor', label: '편집기' },
-        ],
-      },
-    ],
-  },
-  {
     group: '에셋 라이브러리',
     items: [
       {

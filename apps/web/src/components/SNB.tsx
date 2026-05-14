@@ -10,11 +10,6 @@ const Icons = {
       <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
     </svg>
   ),
-  Studio: () => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-      <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
-    </svg>
-  ),
   Asset: () => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
       <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z" />
@@ -80,7 +75,6 @@ const Icons = {
 // 메뉴별 권한 키 매핑
 const MENU_KEY_MAP: Record<string, string> = {
   dashboard:   'dashboard',
-  studio:      'studio',
   asset:       'asset_category',
   'asset-category': 'asset_category',
   'asset-manage':   'asset_manage',
@@ -110,12 +104,6 @@ const navItems: NavItem[] = [
     label: '디지털 트윈 대시보드',
     icon: <Icons.Dashboard />,
     path: '/dashboard',
-  },
-  {
-    id: 'studio',
-    label: '트윈 스튜디오',
-    icon: <Icons.Studio />,
-    path: '/studio',
   },
   {
     id: 'asset',

@@ -56,25 +56,25 @@ export default function LogsPage() {
     new Date(iso).toLocaleString('ko-KR', { hour12: false })
       .replace(/\. /g, '-').replace('.', '');
 
-  // 페이지네이션 버튼 생성
-  const getPageNumbers = () => {
-    const delta = 2;
-    const range: number[] = [];
-    const rangeWithDots: (number | string)[] = [];
+  // 페이지네이션 버튼 생성 — 1페이지 항상 표시, 현재 페이지 ±2 표시
+  const getPageNumbers = (): (number | string)[] => {
+    if (totalPages <= 1) return [1];
 
-    for (let i = Math.max(2, page - delta); i <= Math.min(totalPages - 1, page + delta); i++) {
-      range.push(i);
+    const delta = 2;
+    const result: (number | string)[] = [1];
+
+    const rangeStart = Math.max(2, page - delta);
+    const rangeEnd = Math.min(totalPages, page + delta);
+
+    if (rangeStart > 2) result.push('...');
+
+    for (let i = rangeStart; i <= rangeEnd; i++) {
+      result.push(i);
     }
 
-    if (page - delta > 2) rangeWithDots.push(1, '...');
-    else rangeWithDots.push(1);
+    if (rangeEnd < totalPages) result.push('...');
 
-    rangeWithDots.push(...range);
-
-    if (page + delta < totalPages - 1) rangeWithDots.push('...', totalPages);
-    else if (totalPages > 1) rangeWithDots.push(totalPages);
-
-    return rangeWithDots;
+    return result;
   };
 
   return (
@@ -181,7 +181,17 @@ export default function LogsPage() {
       {/* 페이지네이션 */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-1 mt-6">
-          {/* 이전 */}
+          {/* 처음으로 (10칸 이전) */}
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 10))}
+            disabled={page === 1}
+            className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            «
+          </button>
+
+          {/* 이전 1칸 */}
           <button
             onClick={() => setPage(p => Math.max(1, p - 1))}
             disabled={page === 1}
@@ -209,7 +219,7 @@ export default function LogsPage() {
             )
           )}
 
-          {/* 다음 */}
+          {/* 다음 1칸 */}
           <button
             onClick={() => setPage(p => Math.min(totalPages, p + 1))}
             disabled={page === totalPages}
@@ -217,6 +227,16 @@ export default function LogsPage() {
                        disabled:opacity-40 disabled:cursor-not-allowed"
           >
             ›
+          </button>
+
+          {/* 10칸 앞으로 */}
+          <button
+            onClick={() => setPage(p => Math.min(totalPages, p + 10))}
+            disabled={page === totalPages}
+            className="px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            »
           </button>
         </div>
       )}

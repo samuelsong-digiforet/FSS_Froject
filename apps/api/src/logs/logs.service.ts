@@ -47,22 +47,22 @@ export class LogsService {
     }
 
     if (startDate) {
-      qb.andWhere('log.createdAt >= :startDate', { startDate: new Date(startDate) });
+      qb.andWhere('log.accessedAt >= :startDate', { startDate: new Date(startDate) });
     }
 
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      qb.andWhere('log.createdAt <= :endDate', { endDate: end });
+      qb.andWhere('log.accessedAt <= :endDate', { endDate: end });
     }
 
-    qb.orderBy('log.createdAt', 'DESC')
+    qb.orderBy('log.accessedAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
 
-    const [data, total] = await qb.getManyAndCount();
+    const [items, total] = await qb.getManyAndCount();
 
-    return { data, total, page, limit };
+    return { items, total, page, limit };
   }
 }
 

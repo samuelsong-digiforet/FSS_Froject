@@ -26,6 +26,6 @@ export class Log {
   @Column({ nullable: true })
   action: string;
 
-  @CreateDateColumn()
-  createdAt: Date;
+  @CreateDateColumn({ name: 'created_at' })
+  accessedAt: Date;
 }

@@ -696,13 +696,14 @@ def _point_cloud_from_colmap(processed_dir: str, output_dir: str, report, qualit
 
     report(10)
 
-    print(f"[Converter][PointCloud] splatfacto -> pointcloud export ({num_points} points, quality={quality_preset})")
+    nerf_iterations = cfg["nerf_iterations"]
+    print(f"[Converter][PointCloud] nerfacto -> pointcloud export ({num_points} points, iter={nerf_iterations}, quality={quality_preset})")
     train_dir  = os.path.join(output_dir, "train")
     export_dir = os.path.join(output_dir, "export")
     os.makedirs(export_dir, exist_ok=True)
     try:
         _run_cmd(
-            ["ns-train", "splatfacto", "--data", processed_dir, "--output-dir", train_dir, "--max-num-iterations", "3000", "--viewer.quit-on-train-completion", "True"],
+            ["ns-train", "nerfacto", "--data", processed_dir, "--output-dir", train_dir, "--max-num-iterations", str(nerf_iterations), "--viewer.quit-on-train-completion", "True"],
             report_range=(10, 70), report_fn=report, stop_check=stop_check,
         )
         config_path = _find_nerfstudio_config(train_dir)

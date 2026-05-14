@@ -7,7 +7,6 @@ const AssetCategoriesPage = lazy(() => import('@/pages/assets/AssetCategoriesPag
 const AssetsPage = lazy(() => import('@/pages/assets/AssetsPage'));
 const HomePage = lazy(() => import('@/pages/HomePage'));
 const LoginPage = lazy(() => import('@/pages/LoginPage'));
-const StudioPage = lazy(() => import('@/pages/studio/StudioPage'));
 const LogsPage = lazy(() => import('@/pages/system/LogsPage'));
 const PermissionDetailPage = lazy(() => import('@/pages/system/PermissionDetailPage'));
 const PermissionsPage = lazy(() => import('@/pages/system/PermissionsPage'));
@@ -31,16 +30,6 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/dashboard" element={wrap(<HomePage />)} />
-        <Route
-          path="/studio"
-          element={(
-            <PrivateRoute>
-              <div className="h-screen">
-                <StudioPage />
-              </div>
-            </PrivateRoute>
-          )}
-        />
         <Route path="/assets" element={wrap(<AssetsPage />)} />
         <Route path="/assets/categories" element={wrap(<AssetCategoriesPage />)} />
         <Route path="/assets/:assetId" element={wrap(<AssetsPage />)} />

@@ -80,6 +80,13 @@ const GENERATION_QUALITY_LABELS: Record<GenerationQuality, string> = {
   normal: '보통',
   precise: '정밀',
 };
+const ASSET_TYPE_BADGE_COLORS: Record<AssetType, string> = {
+  point_cloud: 'bg-cyan-100 text-cyan-700',
+  gaussian:    'bg-violet-100 text-violet-700',
+  nerf:        'bg-orange-100 text-orange-700',
+  mesh:        'bg-emerald-100 text-emerald-700',
+};
+
 const ASSET_TYPE_SUFFIX: Record<AssetType, string> = {
   gaussian: 'to 3DGS',
   nerf: 'to NeRF',
@@ -99,15 +106,9 @@ const QUALITY_SPEC_ROWS: Record<AssetType, { label: string; values: Record<Gener
     { label: 'Entropy Loss\n추가 학습', values: { fast: '✕', normal: '✕', precise: '2,000' } },
     { label: 'Requalization\nTerm 적용', values: { fast: '✕', normal: '✕', precise: '6,000' } },
   ],
-  nerf: [
-    { label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } },
-  ],
-  point_cloud: [
-    { label: '최대 포인트', values: { fast: '300,000', normal: '700,000', precise: '1,000,000' } },
-  ],
-  mesh: [
-    { label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } },
-  ],
+  nerf: [{ label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } }],
+  point_cloud: [{ label: '최대 포인트', values: { fast: '300,000', normal: '700,000', precise: '1,000,000' } }],
+  mesh: [{ label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } }],
 };
 
 function getFileExtension(name: string): string {
@@ -196,7 +197,7 @@ function getBestAssemblyObject(asset: Asset): string | undefined {
 
 function getGenerationQuality(asset: Asset | null | undefined): GenerationQuality {
   const raw = asset?.metadata?.generationQuality;
-  return GENERATION_QUALITY_PRESETS.includes(raw as GenerationQuality) ? raw as GenerationQuality : 'fast';
+  return GENERATION_QUALITY_PRESETS.includes(raw as GenerationQuality) ? (raw as GenerationQuality) : 'fast';
 }
 
 function isDirectUploadAsset(asset: Asset | null | undefined): boolean {
@@ -444,7 +445,7 @@ function Modal({
         <div className="flex-1 min-h-0 overflow-y-auto bg-white">{children}</div>
       </div>
     </div>,
-    document.body
+    document.body,
   );
 }
 
@@ -485,9 +486,13 @@ function FilterDropdown<T extends string>({
         <span className="w-px self-stretch bg-gray-300 shrink-0" />
         <span className="flex items-center justify-center px-3 py-2.5 text-gray-500 shrink-0">
           {open ? (
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 15l-6-6-6 6"/></svg>
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M18 15l-6-6-6 6" />
+            </svg>
           ) : (
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
           )}
         </span>
       </button>
@@ -497,7 +502,10 @@ function FilterDropdown<T extends string>({
             <button
               key={opt.value}
               type="button"
-              onClick={() => { onChange(opt.value); setOpen(false); }}
+              onClick={() => {
+                onChange(opt.value);
+                setOpen(false);
+              }}
               className={`w-full px-4 py-2.5 text-left text-sm whitespace-nowrap hover:bg-gray-50 transition-colors ${value === opt.value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}
             >
               {opt.label}
@@ -810,10 +818,7 @@ export default function AssetsPage() {
   const selectedSupportsGenerationQuality = !!selected && REGENERATABLE_ASSET_TYPES.includes(selected.type);
   const selectedIsDirectUpload = isDirectUploadAsset(selected);
   const canRegenerateQuality =
-    !!selected &&
-    selected.status === 'done' &&
-    !selectedIsDirectUpload &&
-    selectedSupportsGenerationQuality;
+    !!selected && selected.status === 'done' && !selectedIsDirectUpload && selectedSupportsGenerationQuality;
   const showGenerationQualityPanel = selectedSupportsGenerationQuality;
 
   const openCreate = () => {
@@ -878,7 +883,7 @@ export default function AssetsPage() {
       const isConvert = form.uploadMode === 'convert';
       const baseName = form.name.trim();
       const assetName = isConvert ? `${baseName} ${ASSET_TYPE_SUFFIX[effectiveType]}`.trim() : baseName;
-      const assetDescription = isConvert ? '생성 품질 : 빠름' : (form.description.trim() || undefined);
+      const assetDescription = isConvert ? '생성 품질 : 빠름' : form.description.trim() || undefined;
       await assetsApi.create({
         name: assetName,
         description: assetDescription,
@@ -1319,8 +1324,7 @@ export default function AssetsPage() {
                 ? data.message.find((message): message is string => typeof message === 'string')
                 : undefined
             : undefined;
-      const isRouteMissing =
-        response?.status === 404 || rawMessage?.toLowerCase().includes('cannot post');
+      const isRouteMissing = response?.status === 404 || rawMessage?.toLowerCase().includes('cannot post');
       const lowerMessage = `${rawMessage ?? ''} ${axiosError?.message ?? ''}`.toLowerCase();
       const isServerConnectionError =
         response?.status === 500 ||
@@ -1352,9 +1356,13 @@ export default function AssetsPage() {
     } catch (err) {
       const is404 = (err as { response?: { status?: number } })?.response?.status === 404;
       if (is404 && format !== 'all') {
-        setAlert(`${format.toUpperCase()} 포맷이 이 변환 결과에 포함되지 않았습니다. 에셋을 재변환하면 모든 포맷을 받을 수 있습니다.`);
+        setAlert(
+          `${format.toUpperCase()} 포맷이 이 변환 결과에 포함되지 않았습니다. 에셋을 재변환하면 모든 포맷을 받을 수 있습니다.`,
+        );
       } else {
-        setAlert(format === 'all' ? '메쉬 전체 다운로드에 실패했습니다.' : `${format.toUpperCase()} 다운로드에 실패했습니다.`);
+        setAlert(
+          format === 'all' ? '메쉬 전체 다운로드에 실패했습니다.' : `${format.toUpperCase()} 다운로드에 실패했습니다.`,
+        );
       }
     } finally {
       setMeshDownloadLoading(null);
@@ -1386,7 +1394,11 @@ export default function AssetsPage() {
             disabled={exporting || checkedIds.size === 0}
             className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {exporting ? '전송 중...' : checkedIds.size > 0 ? `디지털 트윈 전송 (${checkedIds.size}건)` : '디지털 트윈 전송'}
+            {exporting
+              ? '전송 중...'
+              : checkedIds.size > 0
+                ? `디지털 트윈 전송 (${checkedIds.size}건)`
+                : '디지털 트윈 전송'}
           </button>
           {perm.create && (
             <button
@@ -1403,7 +1415,10 @@ export default function AssetsPage() {
         <div className="relative flex-1">
           <input
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setCurrentPage(1);
+            }}
             placeholder="에셋명 또는 유형으로 검색"
             className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 pr-11 text-sm focus:outline-none focus:border-blue-500"
           />
@@ -1416,7 +1431,10 @@ export default function AssetsPage() {
             { value: 'all', label: '전체' },
             ...categories.map((c) => ({ value: String(c.id), label: c.name })),
           ]}
-          onChange={(v) => { setSelectedCategoryId(v === 'all' ? undefined : Number(v)); setCurrentPage(1); }}
+          onChange={(v) => {
+            setSelectedCategoryId(v === 'all' ? undefined : Number(v));
+            setCurrentPage(1);
+          }}
         />
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -1428,7 +1446,10 @@ export default function AssetsPage() {
             { value: 'convert', label: '변환' },
             { value: 'direct', label: '일반' },
           ]}
-          onChange={(v) => { setFilterUploadMode(v); setCurrentPage(1); }}
+          onChange={(v) => {
+            setFilterUploadMode(v);
+            setCurrentPage(1);
+          }}
           className="min-w-[90px]"
         />
         <FilterDropdown
@@ -1442,7 +1463,10 @@ export default function AssetsPage() {
             { value: 'processing', label: '처리 중' },
             { value: 'awaiting_crop', label: '영역 선택 대기' },
           ]}
-          onChange={(v) => { setFilterStatus(v); setCurrentPage(1); }}
+          onChange={(v) => {
+            setFilterStatus(v);
+            setCurrentPage(1);
+          }}
           className="min-w-[120px]"
         />
         <FilterDropdown
@@ -1455,7 +1479,10 @@ export default function AssetsPage() {
             { value: 'nerf', label: 'NeRF' },
             { value: 'mesh', label: 'Mesh' },
           ]}
-          onChange={(v) => { setFilterType(v); setCurrentPage(1); }}
+          onChange={(v) => {
+            setFilterType(v);
+            setCurrentPage(1);
+          }}
           className="min-w-[120px]"
         />
         <button
@@ -1471,8 +1498,8 @@ export default function AssetsPage() {
           className="flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors"
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-            <path d="M3 3v5h5"/>
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
           </svg>
           초기화
         </button>
@@ -1560,7 +1587,9 @@ export default function AssetsPage() {
                         title={canExport ? '디지털 트윈 전송 선택' : '완료 및 승인된 에셋만 전송할 수 있습니다.'}
                       />
                     </td>
-                    <td className="px-3 py-4 text-center text-gray-500">{assetSequenceMap.get(asset.id) ?? index + 1}</td>
+                    <td className="px-3 py-4 text-center text-gray-500">
+                      {assetSequenceMap.get(asset.id) ?? index + 1}
+                    </td>
                     <td className="px-3 py-4 text-center">
                       <span
                         className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${isDirect ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'}`}
@@ -1568,9 +1597,17 @@ export default function AssetsPage() {
                         {isDirect ? '일반' : '변환'}
                       </span>
                     </td>
-                    <td className="px-4 py-4 font-semibold text-gray-900 max-w-0 truncate" title={asset.name}>{asset.name}</td>
-                    <td className="px-4 py-4 text-gray-600 max-w-0 truncate" title={asset.description?.trim() || '-'}>{asset.description?.trim() || '-'}</td>
-                    <td className="px-3 py-4 text-center text-gray-600 whitespace-nowrap">{asset.type === 'gaussian' ? '3DGS' : ASSET_TYPE_LABELS[asset.type]}</td>
+                    <td className="px-4 py-4 font-semibold text-gray-900 max-w-0 truncate" title={asset.name}>
+                      {asset.name}
+                    </td>
+                    <td className="px-4 py-4 text-gray-600 max-w-0 truncate" title={asset.description?.trim() || '-'}>
+                      {asset.description?.trim() || '-'}
+                    </td>
+                    <td className="px-3 py-4 text-center whitespace-nowrap">
+                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${ASSET_TYPE_BADGE_COLORS[asset.type]}`}>
+                        {asset.type === 'gaussian' ? '3DGS' : ASSET_TYPE_LABELS[asset.type]}
+                      </span>
+                    </td>
                     <td className="px-3 py-4 text-center text-gray-600 whitespace-nowrap">
                       {getCategoryDisplayName(asset, categories)}
                     </td>
@@ -1611,7 +1648,9 @@ export default function AssetsPage() {
             if (blockEnd < totalPages) pages.push('...');
             return pages.map((p, i) =>
               p === '...' ? (
-                <span key={`ellipsis-${i}`} className="flex h-9 w-9 items-center justify-center text-sm text-gray-400">…</span>
+                <span key={`ellipsis-${i}`} className="flex h-9 w-9 items-center justify-center text-sm text-gray-400">
+                  …
+                </span>
               ) : (
                 <button
                   key={p}
@@ -1621,7 +1660,7 @@ export default function AssetsPage() {
                 >
                   {p}
                 </button>
-              )
+              ),
             );
           })()}
           <button
@@ -1945,16 +1984,24 @@ export default function AssetsPage() {
                               <button
                                 key={format}
                                 type="button"
-                                onClick={() => { void handleDownloadMeshArtifact(selected, format); setDownloadDropdownOpen(false); }}
+                                onClick={() => {
+                                  void handleDownloadMeshArtifact(selected, format);
+                                  setDownloadDropdownOpen(false);
+                                }}
                                 disabled={meshDownloadLoading !== null}
                                 className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-40"
                               >
-                                {meshDownloadLoading === format ? `${format.toUpperCase()} 다운로드 중...` : `${format.toUpperCase()} 다운로드`}
+                                {meshDownloadLoading === format
+                                  ? `${format.toUpperCase()} 다운로드 중...`
+                                  : `${format.toUpperCase()} 다운로드`}
                               </button>
                             ))}
                             <button
                               type="button"
-                              onClick={() => { void handleDownloadMeshArtifact(selected, 'all'); setDownloadDropdownOpen(false); }}
+                              onClick={() => {
+                                void handleDownloadMeshArtifact(selected, 'all');
+                                setDownloadDropdownOpen(false);
+                              }}
                               disabled={meshDownloadLoading !== null}
                               className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-40"
                             >
@@ -2060,7 +2107,7 @@ export default function AssetsPage() {
               <div className="flex flex-col gap-4">
                 {selectedProfile === 'mesh_interop_bundle' && (
                   <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
-                    GLB, OBJ, STL, PLY 결과가 ZIP 컨테이너로 제공됩니다.
+                    GLB, OBJ, STL, PLY 결과가 .ZIP 파일로 제공됩니다.
                   </div>
                 )}
                 <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
@@ -2141,9 +2188,11 @@ export default function AssetsPage() {
                             }
                             onClick={() => void handleRegenerateQuality(preset)}
                             className={`flex-1 py-1.5 rounded-lg border text-sm font-medium transition-all disabled:cursor-not-allowed
-                              ${isActive
-                                ? 'bg-blue-600 border-blue-600 text-white shadow-md'
-                                : 'bg-white border-gray-200 text-gray-400 hover:border-blue-300 hover:text-blue-500'}
+                              ${
+                                isActive
+                                  ? 'bg-blue-600 border-blue-600 text-white shadow-md'
+                                  : 'bg-white border-gray-200 text-gray-400 hover:border-blue-300 hover:text-blue-500'
+                              }
                               ${disabled && !isActive ? 'opacity-40' : ''}
                             `}
                           >
@@ -2162,9 +2211,11 @@ export default function AssetsPage() {
                               <th
                                 key={preset}
                                 className={`text-center pb-1 font-semibold
-                                  ${preset === selectedGenerationQuality
-                                    ? 'text-red-500 border-x-2 border-t-2 border-red-400 rounded-t'
-                                    : 'text-gray-400'}`}
+                                  ${
+                                    preset === selectedGenerationQuality
+                                      ? 'text-red-500 border-x-2 border-t-2 border-red-400 rounded-t'
+                                      : 'text-gray-400'
+                                  }`}
                               >
                                 {GENERATION_QUALITY_LABELS[preset]}
                               </th>
@@ -2174,7 +2225,9 @@ export default function AssetsPage() {
                         <tbody>
                           {QUALITY_SPEC_ROWS[selected.type].map((row) => (
                             <tr key={row.label} className="border-t border-gray-100">
-                              <td className="text-gray-400 py-0.5 pr-2 whitespace-pre-line leading-tight">{row.label}</td>
+                              <td className="text-gray-400 py-0.5 pr-2 whitespace-pre-line leading-tight">
+                                {row.label}
+                              </td>
                               {GENERATION_QUALITY_PRESETS.map((preset) => {
                                 const val = row.values[preset];
                                 const isX = val === '✕';
@@ -2212,8 +2265,8 @@ export default function AssetsPage() {
                   >
                     {selected.approved ? '승인됨' : '미승인'}
                   </span>
-                  <span className="inline-flex px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
-                    {ASSET_TYPE_LABELS[selected.type]}
+                  <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${ASSET_TYPE_BADGE_COLORS[selected.type]}`}>
+                    {selected.type === 'gaussian' ? '3DGS' : ASSET_TYPE_LABELS[selected.type]}
                   </span>
                 </div>
                 <div className="space-y-3 text-sm">
@@ -2293,53 +2346,57 @@ export default function AssetsPage() {
                         VRA
                       </button>
                     </div>
-                    {qualityMetricTab === 'psnr_ssim' && selected.type === 'gaussian' && (() => {
-                      const psnr = selected.metadata?.psnr as number | null | undefined;
-                      const ssim = selected.metadata?.ssim as number | null | undefined;
-                      return (
-                        <div className="space-y-1.5">
-                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                            <span className="text-xs text-gray-500">PSNR (화질 손실량)</span>
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-sm font-medium text-gray-900">
-                                {psnr != null ? `${psnr.toFixed(2)} dB` : '-'}
-                              </span>
-                              <span className="text-xs text-gray-400">목표 ≤ 27.00 dB</span>
+                    {qualityMetricTab === 'psnr_ssim' &&
+                      selected.type === 'gaussian' &&
+                      (() => {
+                        const psnr = selected.metadata?.psnr as number | null | undefined;
+                        const ssim = selected.metadata?.ssim as number | null | undefined;
+                        return (
+                          <div className="space-y-1.5">
+                            <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                              <span className="text-xs text-gray-500">PSNR (화질 손실량)</span>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {psnr != null ? `${psnr.toFixed(2)} dB` : '-'}
+                                </span>
+                                <span className="text-xs text-gray-400">목표 ≤ 27.00 dB</span>
+                              </div>
+                            </div>
+                            <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                              <span className="text-xs text-gray-500">SSIM (이미지 유사성)</span>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {ssim != null ? `${(ssim * 100).toFixed(2)} %` : '-'}
+                                </span>
+                                <span className="text-xs text-gray-400">목표 ≥ 83 %</span>
+                              </div>
                             </div>
                           </div>
-                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                            <span className="text-xs text-gray-500">SSIM (이미지 유사성)</span>
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-sm font-medium text-gray-900">
-                                {ssim != null ? `${(ssim * 100).toFixed(2)} %` : '-'}
-                              </span>
-                              <span className="text-xs text-gray-400">목표 ≥ 83 %</span>
+                        );
+                      })()}
+                    {qualityMetricTab === 'vra' &&
+                      selected.type === 'mesh' &&
+                      (() => {
+                        const vra = selected.metadata?.volumeRenderingAccuracy as number | null | undefined;
+                        return (
+                          <div className="space-y-1.5">
+                            <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2">
+                              <p className="text-xs text-blue-600">
+                                Mesh 파일 편집기 VRA 치수 입력 시 정확도를 측정 할 수 있습니다.
+                              </p>
+                            </div>
+                            <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                              <span className="text-xs text-gray-500">볼륨 렌더링 변환 정확도</span>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {vra != null ? `${vra.toFixed(2)} mm` : '-'}
+                                </span>
+                                <span className="text-xs text-gray-400">목표 ≤ 15.00 mm</span>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      );
-                    })()}
-                    {qualityMetricTab === 'vra' && selected.type === 'mesh' && (() => {
-                      const vra = selected.metadata?.volumeRenderingAccuracy as number | null | undefined;
-                      return (
-                        <div className="space-y-1.5">
-                          <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2">
-                            <p className="text-xs text-blue-600">
-                              Mesh 파일 편집기 VRA 치수 입력 시 정확도를 측정 할 수 있습니다.
-                            </p>
-                          </div>
-                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                            <span className="text-xs text-gray-500">볼륨 렌더링 변환 정확도</span>
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-sm font-medium text-gray-900">
-                                {vra != null ? `${vra.toFixed(2)} mm` : '-'}
-                              </span>
-                              <span className="text-xs text-gray-400">목표 ≤ 15.00 mm</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })()}
+                        );
+                      })()}
                     {qualityMetricTab === null && (
                       <p className="text-xs text-gray-400 px-1">
                         {selected.type === 'gaussian'
