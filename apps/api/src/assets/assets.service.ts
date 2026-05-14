@@ -3,8 +3,13 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  HttpException,
+  Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
+import * as path from 'path';
 import * as unzipper from 'unzipper';
 import type { Response } from 'express';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -41,6 +46,7 @@ type GenerationQuality = 'fast' | 'normal' | 'precise';
 
 const MAX_OBB_VERSIONS = 50;
 const DEFAULT_GENERATION_QUALITY: GenerationQuality = 'fast';
+const FACTORY_FSS_CATEGORY_NAME = 'etc';
 const GENERATION_QUALITIES = new Set<GenerationQuality>(['fast', 'normal', 'precise']);
 const REGENERATABLE_TYPES = new Set<AssetType>([
   AssetType.POINT_CLOUD,
@@ -64,11 +70,14 @@ type MeshInteropDownloadFormat = keyof typeof MESH_INTEROP_DOWNLOADS;
 
 @Injectable()
 export class AssetsService {
+  private readonly logger = new Logger(AssetsService.name);
+
   constructor(
     @InjectRepository(Asset)
     private readonly assetRepo: Repository<Asset>,
     private readonly storage: StorageService,
     private readonly conversionProducer: ConversionProducer,
+    private readonly config: ConfigService,
   ) {}
 
   async create(dto: CreateAssetDto, userId: number): Promise<Asset> {
@@ -199,6 +208,8 @@ export class AssetsService {
       calibrationMeasuredLength,
       representativeSceneObject,
       volumeRenderingAccuracy,
+      gdtAnnotations,
+      vraPoints,
       ...restDto
     } = dto;
 
@@ -209,7 +220,9 @@ export class AssetsService {
       calibrationReferenceLength !== undefined ||
       calibrationMeasuredLength !== undefined ||
       representativeSceneObject !== undefined ||
-      volumeRenderingAccuracy !== undefined
+      volumeRenderingAccuracy !== undefined ||
+      gdtAnnotations !== undefined ||
+      vraPoints !== undefined
     ) {
       const nextMetadata: Record<string, unknown> = {
         ...(asset.metadata ?? {}),
@@ -218,6 +231,26 @@ export class AssetsService {
         ...(calibrationMeasuredLength !== undefined ? { calibrationMeasuredLength } : {}),
         ...(representativeSceneObject ? { representativeSceneObject } : {}),
         ...(volumeRenderingAccuracy !== undefined ? { volumeRenderingAccuracy } : {}),
+        ...(gdtAnnotations !== undefined
+          ? {
+              gdtAnnotations: gdtAnnotations.map((item) => ({
+                id: item.id,
+                position: [...item.position] as [number, number, number],
+                type: item.type,
+                tolerance: item.tolerance,
+              })),
+            }
+          : {}),
+        ...(vraPoints !== undefined
+          ? {
+              vraPoints: vraPoints.map((item) => ({
+                measured: item.measured,
+                actual: item.actual,
+                ...(item.p1 !== undefined ? { p1: item.p1 } : {}),
+                ...(item.p2 !== undefined ? { p2: item.p2 } : {}),
+              })),
+            }
+          : {}),
       };
       if (representativeSceneObject === null) delete nextMetadata.representativeSceneObject;
       asset.metadata = nextMetadata;
@@ -717,6 +750,177 @@ export class AssetsService {
     });
   }
 
+  async cancelJob(id: number, userId: number): Promise<Asset> {
+    const asset = await this.assetRepo.findOne({ where: { id, userId } });
+    if (!asset) throw new NotFoundException('Asset not found');
+
+    if (asset.jobId) {
+      await this.conversionProducer.cancelJob(asset.jobId).catch(() => null);
+    }
+
+    await this.assetRepo.update(id, {
+      status: AssetStatus.FAILED,
+      errorMessage: '사용자가 작업을 중지했습니다.',
+    } as Partial<Asset>);
+
+    return this.assetRepo.findOne({ where: { id } }) as Promise<Asset>;
+  }
+
+  async exportToExternal(
+    assetIds: number[],
+    userId: number,
+  ): Promise<{ id: number; externalId: number; status: 'created' | 'updated' }[]> {
+    const tenantSchema = 'factory_love';
+    const dtApiUrl = this.config.get<string>('FACTORY_API_URL');
+    const fssApiKey = this.config.get<string>('FSS_API_KEY');
+
+    if (!dtApiUrl || !fssApiKey) {
+      throw new ServiceUnavailableException(
+        '디지털 트윈 전송 서버 설정이 준비되지 않았습니다. 관리자에게 문의해주세요.',
+      );
+    }
+
+    try {
+      const results: { id: number; externalId: number; status: 'created' | 'updated' }[] = [];
+
+      for (const assetId of assetIds) {
+        const asset = await this.assetRepo.findOne({
+          where: { id: assetId, userId },
+        });
+        if (!asset) throw new NotFoundException(`Asset not found: ${assetId}`);
+        if (asset.status !== AssetStatus.DONE) {
+          throw new BadRequestException(`완료되지 않은 에셋은 전송할 수 없습니다: ${assetId}`);
+        }
+        if (!asset.outputObject) {
+          throw new BadRequestException(`전송할 결과 파일이 없습니다: ${assetId}`);
+        }
+        if (!asset.approved) {
+          throw new BadRequestException(`승인되지 않은 에셋은 전송할 수 없습니다: ${assetId}`);
+        }
+
+        const stat = await this.storage.statObject(asset.outputObject);
+        const fileSize = String(stat.size);
+        const fileExt = this.getObjectExtension(asset.outputObject);
+        const previewExt = asset.previewObject && asset.previewObject !== asset.outputObject
+          ? this.getObjectExtension(asset.previewObject)
+          : null;
+        const assetMeta = this.asMetadataRecord(asset.metadata);
+
+        const modelKey = path.posix.join(tenantSchema, 'fss', String(assetId), `model.${fileExt}`);
+        const previewKey = previewExt && asset.previewObject && asset.previewObject !== asset.outputObject
+          ? path.posix.join(tenantSchema, 'fss', String(assetId), `preview.${previewExt}`)
+          : null;
+
+        await this.storage.copyToExternal(asset.outputObject, modelKey);
+        if (previewKey && asset.previewObject) {
+          await this.storage.copyToExternal(asset.previewObject, previewKey);
+        }
+
+        let coverKey = previewKey ?? modelKey;
+        let stripKey = previewKey ?? modelKey;
+
+        if (fileExt === 'glb' || fileExt === 'ply') {
+          try {
+            const res = await fetch(`${dtApiUrl}/asset/fss-generate-thumbnail`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-fss-api-key': fssApiKey },
+              body: JSON.stringify({ modelKey, fileExt }),
+            });
+            if (res.ok) {
+              const json = await res.json() as { data: { coverKey: string; stripKey: string } };
+              coverKey = json.data.coverKey;
+              stripKey = json.data.stripKey;
+              this.logger.log(`[Thumbnail generated] assetId=${assetId} coverKey=${coverKey}`);
+            } else {
+              const body = await res.text().catch(() => '');
+              this.logger.warn(`[Thumbnail generation failed] assetId=${assetId} status=${res.status} body=${body}`);
+            }
+          } catch (error) {
+            this.logger.warn(`[Thumbnail generation API error] assetId=${assetId} error=${error}`);
+          }
+        }
+
+        const pushPayload = (withExternalId: boolean) => JSON.stringify({
+          schemaName: tenantSchema,
+          ...(withExternalId && asset.externalId ? { externalAssetId: asset.externalId } : {}),
+          name: asset.name,
+          description: asset.description ?? undefined,
+          categoryName: FACTORY_FSS_CATEGORY_NAME,
+          modelKey,
+          coverKey,
+          stripKey,
+          fileExt,
+          fileSize,
+          meta: Object.keys(assetMeta).length > 0 ? assetMeta : undefined,
+          isApprove: false,
+        });
+
+        let pushRes = await fetch(`${dtApiUrl}/asset/fss-push`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-fss-api-key': fssApiKey },
+          body: pushPayload(true),
+        });
+
+        if (pushRes.status === 404 && asset.externalId) {
+          this.logger.warn(`[fss-push] externalId=${asset.externalId} not found in D.T, retrying as new asset`);
+          await this.assetRepo.update(assetId, { externalId: null });
+          asset.externalId = null;
+          pushRes = await fetch(`${dtApiUrl}/asset/fss-push`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-fss-api-key': fssApiKey },
+            body: pushPayload(false),
+          });
+        }
+
+        if (!pushRes.ok) {
+          const body = await pushRes.text().catch(() => '');
+          throw new Error(`D.T fss-push 실패: status=${pushRes.status} body=${body}`);
+        }
+
+        const pushJson = await pushRes.json() as { data: { assetId: number; status: 'created' | 'updated' } };
+        const externalId = pushJson.data.assetId;
+        const exportStatus = pushJson.data.status;
+
+        if (exportStatus === 'created' || asset.externalId !== externalId) {
+          await this.assetRepo.update(assetId, { externalId });
+        }
+
+        results.push({ id: assetId, externalId, status: exportStatus });
+      }
+
+      return results;
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Digital twin export failed: ${detail}`, error instanceof Error ? error.stack : undefined);
+
+      throw new ServiceUnavailableException(this.getExternalExportFailureMessage(detail));
+    }
+  }
+
+  private getExternalExportFailureMessage(detail: string): string {
+    const lowerDetail = detail.toLowerCase();
+    const isConnectionIssue =
+      lowerDetail.includes('ext_db_host') ||
+      lowerDetail.includes('ext_s3_endpoint') ||
+      lowerDetail.includes('econnrefused') ||
+      lowerDetail.includes('enotfound') ||
+      lowerDetail.includes('getaddrinfo') ||
+      lowerDetail.includes('timed out') ||
+      lowerDetail.includes('timeout') ||
+      lowerDetail.includes('fetch failed') ||
+      lowerDetail.includes('socket hang up');
+
+    if (isConnectionIssue) {
+      return '현재 디지털 트윈 서버에 연결할 수 없어 전송할 수 없습니다. 잠시 후 다시 시도해주세요.';
+    }
+
+    return '디지털 트윈 전송 중 서버 연결 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
+  }
+
   async remove(id: number, userId: number): Promise<void> {
     const asset = await this.assetRepo.findOne({ where: { id, userId } });
     if (!asset) throw new NotFoundException('Asset not found');
@@ -823,6 +1027,10 @@ export class AssetsService {
       a.rotation.every((value, index) => value === b.rotation[index]) &&
       a.scale.every((value, index) => value === b.scale[index])
     );
+  }
+
+  private getObjectExtension(objectName: string): string {
+    return path.extname(objectName).replace('.', '').toLowerCase() || 'bin';
   }
 
   private getDownloadBaseName(name: string): string {

@@ -78,6 +78,18 @@ services:
       MINIO_PORT: 9000
       MINIO_BUCKET: ${MINIO_BUCKET}
       MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL}
+      EXT_DB_HOST: ${EXT_DB_HOST}
+      EXT_DB_PORT: ${EXT_DB_PORT}
+      EXT_DB_NAME: ${EXT_DB_NAME}
+      EXT_DB_USER: ${EXT_DB_USER}
+      EXT_DB_PASS: ${EXT_DB_PASS}
+      EXT_S3_ENDPOINT: ${EXT_S3_ENDPOINT}
+      EXT_S3_ACCESS_KEY: ${EXT_S3_ACCESS_KEY}
+      EXT_S3_SECRET_KEY: ${EXT_S3_SECRET_KEY}
+      EXT_S3_BUCKET: ${EXT_S3_BUCKET}
+      EXT_S3_REGION: ${EXT_S3_REGION}
+      FACTORY_API_URL: ${FACTORY_API_URL}
+      FSS_API_KEY: ${FSS_API_KEY}
     command: npx nest start --watch
     depends_on:
       - postgres

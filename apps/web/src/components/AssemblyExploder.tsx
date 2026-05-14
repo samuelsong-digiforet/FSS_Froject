@@ -1,6 +1,6 @@
-import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Canvas, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 
@@ -14,7 +14,8 @@ type AssemblyInfo = {
 
 type AssemblyPart = {
   object: THREE.Object3D;
-  originalPosition: THREE.Vector3;
+  assembledPosition: THREE.Vector3;
+  explodedPosition: THREE.Vector3;
   originalQuaternion: THREE.Quaternion;
   originalScale: THREE.Vector3;
   originalWorldPosition: THREE.Vector3;
@@ -30,6 +31,7 @@ type PreparedAssembly = {
 };
 
 const MIN_EXPLODE_PARTS = 2;
+const ASSEMBLY_ANIMATION_MS = 700;
 
 function isMeshLike(object: THREE.Object3D): boolean {
   const candidate = object as THREE.Mesh & { isSkinnedMesh?: boolean };
@@ -77,6 +79,12 @@ function fallbackDirection(index: number, count: number): THREE.Vector3 {
   return new THREE.Vector3(Math.cos(angle), y, Math.sin(angle)).normalize();
 }
 
+function easeInOutCubic(value: number): number {
+  return value < 0.5
+    ? 4 * value * value * value
+    : 1 - Math.pow(-2 * value + 2, 3) / 2;
+}
+
 function cloneScene(sourceScene: THREE.Group): THREE.Group {
   const scene = sourceScene.clone(true);
   return scene;
@@ -112,6 +120,7 @@ function prepareAssembly(sourceScene: THREE.Group): PreparedAssembly {
   const partObjects = collectPartObjects(branchRoot, scene);
 
   const parts = partObjects.map((object, index) => {
+    const parent = object.parent;
     const partBox = new THREE.Box3().setFromObject(object);
     const partCenter = new THREE.Vector3();
     const partSize = new THREE.Vector3();
@@ -125,12 +134,18 @@ function prepareAssembly(sourceScene: THREE.Group): PreparedAssembly {
       direction.normalize();
     }
 
+    const originalWorldPosition = object.getWorldPosition(new THREE.Vector3());
+    const targetWorldPosition = originalWorldPosition
+      .clone()
+      .add(direction.clone().multiplyScalar(maxAxis * 0.75 + Math.min(partSize.length() * 0.25, maxAxis * 0.35)));
+
     return {
       object,
-      originalPosition: object.position.clone(),
+      assembledPosition: object.position.clone(),
+      explodedPosition: parent ? parent.worldToLocal(targetWorldPosition) : object.position.clone(),
       originalQuaternion: object.quaternion.clone(),
       originalScale: object.scale.clone(),
-      originalWorldPosition: object.getWorldPosition(new THREE.Vector3()),
+      originalWorldPosition,
       direction,
       distance: maxAxis * 0.75 + Math.min(partSize.length() * 0.25, maxAxis * 0.35),
     };
@@ -146,9 +161,15 @@ function prepareAssembly(sourceScene: THREE.Group): PreparedAssembly {
   };
 }
 
-function applyAssemblyMode(assembly: PreparedAssembly, mode: AssemblyMode) {
+function setAssemblyProgress(assembly: PreparedAssembly, progress: number) {
+  const amount = THREE.MathUtils.clamp(progress, 0, 1);
+
   assembly.parts.forEach((part) => {
-    part.object.position.copy(part.originalPosition);
+    part.object.position.set(
+      THREE.MathUtils.lerp(part.assembledPosition.x, part.explodedPosition.x, amount),
+      THREE.MathUtils.lerp(part.assembledPosition.y, part.explodedPosition.y, amount),
+      THREE.MathUtils.lerp(part.assembledPosition.z, part.explodedPosition.z, amount),
+    );
     part.object.quaternion.copy(part.originalQuaternion);
     part.object.scale.copy(part.originalScale);
     part.object.updateMatrix();
@@ -157,28 +178,14 @@ function applyAssemblyMode(assembly: PreparedAssembly, mode: AssemblyMode) {
 
   assembly.scene.updateMatrix();
   assembly.scene.updateMatrixWorld(true);
+}
 
-  if (mode === 'exploded' && assembly.parts.length >= MIN_EXPLODE_PARTS) {
-    assembly.parts.forEach((part) => {
-      const parent = part.object.parent;
-      if (!parent) return;
-
-      const targetWorld = part.originalWorldPosition
-        .clone()
-        .add(part.direction.clone().multiplyScalar(part.distance));
-
-      part.object.position.copy(parent.worldToLocal(targetWorld));
-      part.object.updateMatrix();
-      part.object.matrixWorldNeedsUpdate = true;
-    });
-  }
-
-  assembly.scene.updateMatrix();
-  assembly.scene.updateMatrixWorld(true);
+function getModeProgress(mode: AssemblyMode, assembly: PreparedAssembly): number {
+  return mode === 'exploded' && assembly.parts.length >= MIN_EXPLODE_PARTS ? 1 : 0;
 }
 
 function CameraFit({ radius }: { radius: number }) {
-  const { camera } = useThree();
+  const { camera, controls } = useThree();
 
   useEffect(() => {
     const perspectiveCamera = camera as THREE.PerspectiveCamera;
@@ -189,7 +196,13 @@ function CameraFit({ radius }: { radius: number }) {
     camera.far = distance * 20;
     camera.lookAt(0, 0, 0);
     perspectiveCamera.updateProjectionMatrix();
-  }, [camera, radius]);
+
+    if (controls) {
+      const orbitControls = controls as unknown as { minDistance: number; maxDistance: number };
+      orbitControls.minDistance = radius * 0.5;
+      orbitControls.maxDistance = distance * 5;
+    }
+  }, [camera, controls, radius]);
 
   return null;
 }
@@ -204,11 +217,63 @@ function AssemblyModel({
   onInfo: (info: AssemblyInfo) => void;
 }) {
   const { scene: sourceScene } = useGLTF(url);
+  const { invalidate } = useThree();
   const assembly = useMemo(() => prepareAssembly(sourceScene), [sourceScene]);
+  const progressRef = useRef(getModeProgress(mode, assembly));
+  const animationRef = useRef<{
+    from: number;
+    to: number;
+    start: number;
+  } | null>(null);
 
   useLayoutEffect(() => {
-    applyAssemblyMode(assembly, mode);
-  }, [assembly, mode]);
+    const progress = getModeProgress(mode, assembly);
+    progressRef.current = progress;
+    animationRef.current = null;
+    setAssemblyProgress(assembly, progress);
+    invalidate();
+  }, [assembly, invalidate]);
+
+  useEffect(() => {
+    const target = getModeProgress(mode, assembly);
+    const current = progressRef.current;
+
+    if (Math.abs(current - target) < 0.001) {
+      setAssemblyProgress(assembly, target);
+      progressRef.current = target;
+      animationRef.current = null;
+      invalidate();
+      return;
+    }
+
+    animationRef.current = {
+      from: current,
+      to: target,
+      start: performance.now(),
+    };
+    invalidate();
+  }, [assembly, invalidate, mode]);
+
+  useFrame(() => {
+    const animation = animationRef.current;
+    if (!animation) return;
+
+    const elapsed = performance.now() - animation.start;
+    const rawProgress = THREE.MathUtils.clamp(elapsed / ASSEMBLY_ANIMATION_MS, 0, 1);
+    const eased = easeInOutCubic(rawProgress);
+    const nextProgress = THREE.MathUtils.lerp(animation.from, animation.to, eased);
+
+    progressRef.current = nextProgress;
+    setAssemblyProgress(assembly, nextProgress);
+
+    if (rawProgress >= 1) {
+      progressRef.current = animation.to;
+      setAssemblyProgress(assembly, animation.to);
+      animationRef.current = null;
+    } else {
+      invalidate();
+    }
+  });
 
   useEffect(() => {
     onInfo({
@@ -234,6 +299,16 @@ function LoadingFallback() {
   );
 }
 
+function InvalidateOnChange({ value }: { value: string | number }) {
+  const { invalidate } = useThree();
+
+  useEffect(() => {
+    invalidate();
+  }, [invalidate, value]);
+
+  return null;
+}
+
 export default function AssemblyExploder({
   url,
   title,
@@ -245,6 +320,7 @@ export default function AssemblyExploder({
 }) {
   const [mode, setMode] = useState<AssemblyMode>('assembled');
   const [info, setInfo] = useState<AssemblyInfo>({ partCount: 0, canExplode: false });
+  const [bgColor, setBgColor] = useState('#ffffff');
 
   useEffect(() => {
     setMode('assembled');
@@ -312,6 +388,16 @@ export default function AssemblyExploder({
           </button>
         </div>
 
+        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-400">
+          배경색
+          <input
+            type="color"
+            value={bgColor}
+            onChange={(event) => setBgColor(event.target.value)}
+            className="h-5 w-7 cursor-pointer rounded border-0 bg-transparent"
+          />
+        </label>
+
         <button
           type="button"
           onClick={onClose}
@@ -335,13 +421,13 @@ export default function AssemblyExploder({
             frameloop="demand"
             gl={{ antialias: false, powerPreference: 'high-performance' }}
           >
-            <color attach="background" args={['#0f172a']} />
+            <InvalidateOnChange value={bgColor} />
+            <color attach="background" args={[bgColor]} />
             <ambientLight intensity={0.8} />
             <directionalLight position={[5, 8, 6]} intensity={1.3} />
             <directionalLight position={[-5, 3, -4]} intensity={0.45} />
             <AssemblyModel url={url} mode={mode} onInfo={handleInfo} />
-            <gridHelper args={[10, 20, '#334155', '#1e293b']} position={[0, -0.01, 0]} />
-            <OrbitControls makeDefault enableDamping={false} target={[0, 0, 0]} />
+            <OrbitControls makeDefault enableDamping={false} target={[0, 0, 0]} minDistance={0.5} maxDistance={500} />
           </Canvas>
         </Suspense>
       </div>

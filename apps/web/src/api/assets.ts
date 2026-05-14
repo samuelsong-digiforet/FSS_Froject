@@ -6,8 +6,7 @@ export type AssetStatus =
   | 'processing'
   | 'awaiting_crop'
   | 'done'
-  | 'failed'
-  | 'gpu_required';
+  | 'failed';
 export type AssetUploadMode = 'direct' | 'convert';
 export type MeshInteropDownloadFormat = 'glb' | 'obj' | 'stl' | 'ply' | 'all';
 export type GenerationQuality = 'fast' | 'normal' | 'precise';
@@ -26,9 +25,25 @@ export interface AssetObbVersion {
   sceneObject?: string;
 }
 
+export interface AssetGdtAnnotation {
+  id: string;
+  position: [number, number, number];
+  type: string;
+  tolerance: string;
+}
+
+export interface AssetVraPoint {
+  measured: number;
+  actual: string;
+  p1?: [number, number, number];
+  p2?: [number, number, number];
+}
+
 export interface AssetMetadata extends Record<string, unknown> {
   obbParams?: AssetObb;
   obbVersions?: AssetObbVersion[];
+  gdtAnnotations?: AssetGdtAnnotation[];
+  vraPoints?: AssetVraPoint[];
   representativeSceneObject?: string;
   uploadMode?: AssetUploadMode;
   generationQuality?: GenerationQuality;
@@ -54,6 +69,7 @@ export interface Asset {
   userId: string;
   categoryId?: number;
   category?: { id: number; name: string };
+  externalId?: number | null;
   createdAt: string;
   updatedAt: string;
   // API 응답에 포함되는 presigned URL
@@ -109,6 +125,8 @@ export const assetsApi = {
       calibrationMeasuredLength?: number;
       representativeSceneObject?: string | null;
       volumeRenderingAccuracy?: number;
+      gdtAnnotations?: AssetGdtAnnotation[];
+      vraPoints?: AssetVraPoint[];
     },
   ) => api.patch<Asset>(`/assets/${id}`, data),
   remove: (id: string) => api.delete(`/assets/${id}`),
@@ -134,8 +152,13 @@ export const assetsApi = {
     api.post<Asset>(`/assets/${id}/clone`, { qualityPreset }),
   downloadMeshArtifact: (id: string, format: MeshInteropDownloadFormat) =>
     api.get<Blob>(`/assets/${id}/download`, { params: { format }, responseType: 'blob' }),
+  cancel: (id: string) => api.post<Asset>(`/assets/${id}/cancel`),
+  retry: (id: string, qualityPreset: GenerationQuality) =>
+    api.post<Asset>(`/assets/${id}/regenerate`, { qualityPreset }),
   rename: (id: string, name: string) => api.patch<Asset>(`/assets/${id}/rename`, { name }),
   toggleApproval: (id: string) => api.patch<Asset>(`/assets/${id}/approval`),
+  exportToExternal: (assetIds: Array<string | number>) =>
+    api.post<{ id: number; externalId: number; status: 'created' | 'updated' }[]>('/assets/export', { assetIds }),
   getStreamUrl: (objectName: string): string => `/api/uploads/stream/${objectName}`,
   getNerfFrames: (id: string) => api.get<{ count: number; paths: string[] }>(`/assets/${id}/nerf-frames`),
   getNerfFrameUrl: (id: string, framePath: string): string =>
@@ -160,7 +183,7 @@ export const ASSET_TYPE_LABELS: Record<AssetType, string> = {
   point_cloud: '포인트 클라우드',
   nerf: 'NeRF',
   gaussian: '3D 가우시안 스플래팅',
-  mesh: '메시',
+  mesh: 'Mesh',
 };
 
 export const ASSET_STATUS_LABELS: Record<AssetStatus, string> = {
@@ -169,7 +192,6 @@ export const ASSET_STATUS_LABELS: Record<AssetStatus, string> = {
   awaiting_crop: '영역 선택 대기',
   done: '완료',
   failed: '실패',
-  gpu_required: 'GPU 필요',
 };
 
 export const ASSET_STATUS_COLORS: Record<AssetStatus, string> = {
@@ -178,5 +200,4 @@ export const ASSET_STATUS_COLORS: Record<AssetStatus, string> = {
   awaiting_crop: 'bg-orange-100 text-orange-700',
   done: 'bg-green-100 text-green-700',
   failed: 'bg-red-100 text-red-600',
-  gpu_required: 'bg-purple-100 text-purple-700',
 };

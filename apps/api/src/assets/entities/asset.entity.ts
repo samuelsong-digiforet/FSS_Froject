@@ -16,7 +16,6 @@ export enum AssetStatus {
   AWAITING_CROP  = 'awaiting_crop',  // mesh: Stage 1 완료, 영역 선택 대기
   DONE           = 'done',           // 2단계 풀 변환 완료
   FAILED         = 'failed',         // 변환 실패
-  GPU_REQUIRED   = 'gpu_required',   // GPU 서버 필요 (3DGS/NeRF)
 }
 
 export enum AssetType {
@@ -91,6 +90,9 @@ export class Asset {
 
   @Column({ name: 'user_id' })
   userId: number;
+
+  @Column({ name: 'external_id', nullable: true, type: 'int' })
+  externalId: number | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

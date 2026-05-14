@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TerminusModule } from '@nestjs/terminus';
-import { BullModule } from '@nestjs/bullmq';
 import { RolesModule } from './roles/roles.module';
 import * as Joi from 'joi';
 import { DatabaseModule } from './database/database.module';
@@ -13,7 +12,17 @@ import { UsersModule } from './users/users.module';
 import { LogsModule } from './logs/logs.module';
 import { AssetCategoriesModule } from './asset-categories/asset-categories.module';
 import { ScenesModule } from './scenes/scenes.module';
+import { ExternalDbModule } from './external-db/external-db.module';
 import { HealthController } from './health/health.controller';
+
+const hasExternalDbConfig = [
+  'EXT_DB_HOST',
+  'EXT_DB_NAME',
+  'EXT_DB_USER',
+  'EXT_DB_PASS',
+].every((key) => Boolean(process.env[key]));
+
+const optionalModules = hasExternalDbConfig ? [ExternalDbModule] : [];
 
 @Module({
   imports: [
@@ -32,18 +41,12 @@ import { HealthController } from './health/health.controller';
         JWT_SECRET: Joi.string().min(32).required(),
       }).options({ allowUnknown: true }),
     }),
-    // BullMQ Redis 전역 연결
-    BullModule.forRoot({
-      connection: {
-        host: 'redis',
-        port: 6379,
-      },
-    }),
     DatabaseModule,
+    ...optionalModules,
+    QueueModule,
     AuthModule,
     UploadsModule,
     AssetsModule,
-    QueueModule,
     RolesModule,
     UsersModule,
     LogsModule,

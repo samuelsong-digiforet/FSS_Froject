@@ -1,6 +1,53 @@
-import { IsString, IsEnum, IsOptional, IsInt, IsBoolean, ValidateIf, IsNumber } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  ValidateIf,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { AssetStatus } from '../entities/asset.entity';
+
+class GdtAnnotationDto {
+  @IsString()
+  id: string;
+
+  @IsArray()
+  @ArrayMinSize(3)
+  @ArrayMaxSize(3)
+  @IsNumber({}, { each: true })
+  @Type(() => Number)
+  position: [number, number, number];
+
+  @IsString()
+  type: string;
+
+  @IsString()
+  tolerance: string;
+}
+
+class VraPointDto {
+  @IsNumber()
+  @Type(() => Number)
+  measured: number;
+
+  @IsString()
+  actual: string;
+
+  @IsOptional()
+  @IsArray()
+  p1?: [number, number, number];
+
+  @IsOptional()
+  @IsArray()
+  p2?: [number, number, number];
+}
 
 export class UpdateAssetDto {
   @IsOptional()
@@ -61,4 +108,17 @@ export class UpdateAssetDto {
   @IsNumber()
   @Type(() => Number)
   volumeRenderingAccuracy?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => GdtAnnotationDto)
+  gdtAnnotations?: GdtAnnotationDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => VraPointDto)
+  vraPoints?: VraPointDto[];
 }

@@ -1,10 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   assetsApi,
   type Asset,
+  type AssetGdtAnnotation,
   type AssetObb,
   type AssetObbVersion,
+  type AssetVraPoint,
   type MeshInteropDownloadFormat,
   type AssetStatus,
   type AssetType,
@@ -93,6 +96,8 @@ const GENERATION_QUALITY_HINTS: Record<GenerationQuality, string> = {
 const QUALITY_SPEC_ROWS: Record<AssetType, { label: string; values: Record<GenerationQuality, string> }[]> = {
   gaussian: [
     { label: '학습 반복', values: { fast: '3,000', normal: '7,000', precise: '15,000' } },
+    { label: 'Entropy Loss\n추가 학습', values: { fast: '✕', normal: '✕', precise: '2,000' } },
+    { label: 'Requalization\nTerm 적용', values: { fast: '✕', normal: '✕', precise: '6,000' } },
   ],
   nerf: [
     { label: '학습 반복', values: { fast: '5,000', normal: '15,000', precise: '30,000' } },
@@ -421,7 +426,7 @@ function Modal({
   wide?: boolean;
   zClass?: string;
 }) {
-  return (
+  return createPortal(
     <div className={`fixed inset-0 ${zClass} bg-black/60 p-4 flex items-center justify-center`}>
       <div
         className={`w-full ${wide ? 'max-w-6xl' : 'max-w-2xl'} max-h-[90vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col`}
@@ -438,6 +443,68 @@ function Modal({
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto bg-white">{children}</div>
       </div>
+    </div>,
+    document.body
+  );
+}
+
+function FilterDropdown<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = options.find((o) => o.value === value);
+  const displayLabel = value === ('all' as T) ? label : (selected?.label ?? label);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div ref={ref} className={`relative select-none${className ? ` ${className}` : ''}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-0 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:border-gray-400"
+      >
+        <span className="flex-1 px-4 py-2.5 whitespace-nowrap text-left">{displayLabel}</span>
+        <span className="w-px self-stretch bg-gray-300 shrink-0" />
+        <span className="flex items-center justify-center px-3 py-2.5 text-gray-500 shrink-0">
+          {open ? (
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 15l-6-6-6 6"/></svg>
+          ) : (
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M6 9l6 6 6-6"/></svg>
+          )}
+        </span>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+          {options.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              className={`w-full px-4 py-2.5 text-left text-sm whitespace-nowrap hover:bg-gray-50 transition-colors ${value === opt.value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -458,10 +525,18 @@ export default function AssetsPage() {
   const [categories, setCategories] = useState<AssetCategory[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | undefined>();
   const [search, setSearch] = useState('');
+  const [filterUploadMode, setFilterUploadMode] = useState<'all' | 'direct' | 'convert'>('all');
+  const [filterStatus, setFilterStatus] = useState<AssetStatus | 'all'>('all');
+  const [filterType, setFilterType] = useState<AssetType | 'all'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const PAGE_SIZE = 5;
   const [loading, setLoading] = useState(false);
   const [alert, setAlert] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalType>('none');
   const [selected, setSelected] = useState<Asset | null>(null);
+  const [qualityMetricTab, setQualityMetricTab] = useState<'psnr_ssim' | 'vra' | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Asset | null>(null);
   const [form, setForm] = useState<{
     name: string;
@@ -529,6 +604,11 @@ export default function AssetsPage() {
     },
     [selectedId, syncDraftObb],
   );
+
+  const applyUpdatedAsset = useCallback((updated: Asset) => {
+    setSelected((prev) => (prev?.id === updated.id ? updated : prev));
+    setAssets((prev) => prev.map((asset) => (asset.id === updated.id ? updated : asset)));
+  }, []);
 
   const fetchAssets = useCallback(
     async (silent = false) => {
@@ -690,9 +770,21 @@ export default function AssetsPage() {
       const q = search.trim().toLowerCase();
       const matchesQuery =
         !q || asset.name.toLowerCase().includes(q) || ASSET_TYPE_LABELS[asset.type].toLowerCase().includes(q);
-      return matchesCategory && matchesQuery;
+      const matchesUploadMode =
+        filterUploadMode === 'all' ||
+        (filterUploadMode === 'direct' ? isDirectUploadAsset(asset) : !isDirectUploadAsset(asset));
+      const matchesStatus = filterStatus === 'all' || asset.status === filterStatus;
+      const matchesType = filterType === 'all' || asset.type === filterType;
+      return matchesCategory && matchesQuery && matchesUploadMode && matchesStatus && matchesType;
     })
     .sort((a, b) => (assetSequenceMap.get(b.id) ?? 0) - (assetSequenceMap.get(a.id) ?? 0));
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pagedAssets = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const exportablePageIds = pagedAssets
+    .filter((asset) => asset.status === 'done' && asset.approved)
+    .map((asset) => String(asset.id));
   const createProfiles = getOutputProfilesForType(form.type);
   const createFormatConfig = getUploadFormatConfig(form.type, form.uploadMode);
   const detectedInput = file ? detectInputFormatFromName(file.name) : undefined;
@@ -758,6 +850,7 @@ export default function AssetsPage() {
       if (metaCenter) setPreviewCenter(metaCenter);
       if (metaBounds) setPreviewBounds(metaBounds);
       setSelected(data);
+      setQualityMetricTab(data.type === 'mesh' ? 'vra' : data.type === 'gaussian' ? 'psnr_ssim' : null);
       setModal('detail');
     } catch {
       setAlert('에셋 상세 정보를 불러오지 못했습니다.');
@@ -821,6 +914,39 @@ export default function AssetsPage() {
     }
   };
 
+  const [actionLoading, setActionLoading] = useState<'retry' | 'cancel' | null>(null);
+
+  const handleRetry = async () => {
+    if (!selected) return;
+    setActionLoading('retry');
+    try {
+      const quality = (selected.metadata?.generationQuality as GenerationQuality | undefined) ?? 'normal';
+      const { data: updated } = await assetsApi.retry(selected.id, quality);
+      setSelected(updated);
+      void fetchAssets();
+      setAlert('재시도를 시작했습니다.');
+    } catch {
+      setAlert('재시도에 실패했습니다.');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleCancelJob = async () => {
+    if (!selected) return;
+    setActionLoading('cancel');
+    try {
+      const { data: updated } = await assetsApi.cancel(selected.id);
+      setSelected(updated);
+      void fetchAssets();
+      setAlert('작업을 중지했습니다.');
+    } catch {
+      setAlert('작업 중지에 실패했습니다.');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleResumeStage2 = async (withCrop: boolean, override?: ResumeOverride) => {
     if (!selected) return;
     setCropLoading(true);
@@ -874,28 +1000,44 @@ export default function AssetsPage() {
 
   const handleSaveCalibration = useCallback(
     async (calibrationScale: number, calibrationReferenceLength: number, calibrationMeasuredLength: number) => {
-      if (!selected) return;
+      if (!selectedId) return;
 
-      const { data: updated } = await assetsApi.update(selected.id, {
+      const { data: updated } = await assetsApi.update(selectedId, {
         calibrationScale,
         calibrationReferenceLength,
         calibrationMeasuredLength,
       });
 
-      setSelected(updated);
-      await fetchAssets();
+      applyUpdatedAsset(updated);
     },
-    [fetchAssets, selected],
+    [applyUpdatedAsset, selectedId],
   );
 
   const handleSaveVra = useCallback(
-    async (vra: number) => {
-      if (!selected) return;
-      const { data: updated } = await assetsApi.update(selected.id, { volumeRenderingAccuracy: vra });
-      setSelected(updated);
-      await fetchAssets();
+    async (vra: number, vraPoints: AssetVraPoint[]) => {
+      if (!selectedId) return;
+      const { data: updated } = await assetsApi.update(selectedId, { volumeRenderingAccuracy: vra, vraPoints });
+      applyUpdatedAsset(updated);
     },
-    [fetchAssets, selected],
+    [applyUpdatedAsset, selectedId],
+  );
+
+  const handleSaveGdtAnnotations = useCallback(
+    async (gdtAnnotations: AssetGdtAnnotation[]) => {
+      if (!selectedId) return;
+      const { data: updated } = await assetsApi.update(selectedId, { gdtAnnotations });
+      applyUpdatedAsset(updated);
+    },
+    [applyUpdatedAsset, selectedId],
+  );
+
+  const handleSaveVraPoints = useCallback(
+    async (vraPoints: AssetVraPoint[]) => {
+      if (!selectedId) return;
+      const { data: updated } = await assetsApi.update(selectedId, { vraPoints });
+      applyUpdatedAsset(updated);
+    },
+    [applyUpdatedAsset, selectedId],
   );
 
   const handleSaveCroppedScene = useCallback(
@@ -1153,6 +1295,56 @@ export default function AssetsPage() {
     }
   };
 
+  const handleExport = async () => {
+    if (checkedIds.size === 0 || exporting) return;
+    setExporting(true);
+    try {
+      const { data: results } = await assetsApi.exportToExternal([...checkedIds]);
+      const created = results.filter((result) => result.status === 'created').length;
+      const updated = results.filter((result) => result.status === 'updated').length;
+      setCheckedIds(new Set());
+      await fetchAssets(true);
+      setAlert(`디지털 트윈 전송 완료\n신규: ${created}건 / 업데이트: ${updated}건`);
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { status?: number; data?: unknown }; message?: string };
+      const response = axiosError?.response;
+      const data = response?.data;
+      const rawMessage =
+        typeof data === 'string'
+          ? data
+          : typeof data === 'object' && data && 'message' in data
+            ? typeof data.message === 'string'
+              ? data.message
+              : Array.isArray(data.message)
+                ? data.message.find((message): message is string => typeof message === 'string')
+                : undefined
+            : undefined;
+      const isRouteMissing =
+        response?.status === 404 || rawMessage?.toLowerCase().includes('cannot post');
+      const lowerMessage = `${rawMessage ?? ''} ${axiosError?.message ?? ''}`.toLowerCase();
+      const isServerConnectionError =
+        response?.status === 500 ||
+        response?.status === 502 ||
+        response?.status === 503 ||
+        lowerMessage.includes('internal server error') ||
+        lowerMessage.includes('network error') ||
+        lowerMessage.includes('failed to fetch') ||
+        lowerMessage.includes('fetch failed') ||
+        lowerMessage.includes('econnrefused') ||
+        lowerMessage.includes('enotfound') ||
+        lowerMessage.includes('timeout');
+      setAlert(
+        isRouteMissing
+          ? '디지털 트윈 전송 기능을 준비 중입니다. 서버 반영 후 다시 시도해주세요.'
+          : isServerConnectionError
+            ? '디지털 트윈 서버 연결 오류로 전송에 실패했습니다. 잠시 후 다시 시도해주세요.'
+            : (rawMessage ?? '디지털 트윈 전송에 실패했습니다. 잠시 후 다시 시도해주세요.'),
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const handleDownloadMeshArtifact = useCallback(async (asset: Asset, format: MeshInteropDownloadFormat) => {
     setMeshDownloadLoading(format);
     try {
@@ -1187,90 +1379,259 @@ export default function AssetsPage() {
           <h1 className="text-2xl font-bold text-gray-900">에셋 관리</h1>
           <p className="text-sm text-gray-500 mt-1">입력 포맷 자동 감지와 출력 프로파일 기반 변환을 관리합니다.</p>
         </div>
-        {perm.create && (
+        <div className="flex items-center gap-2 self-start">
           <button
             type="button"
-            onClick={openCreate}
-            className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm hover:bg-gray-800 self-start"
+            onClick={() => void handleExport()}
+            disabled={exporting || checkedIds.size === 0}
+            className="px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            새 에셋 업로드
+            {exporting ? '전송 중...' : checkedIds.size > 0 ? `디지털 트윈 전송 (${checkedIds.size}건)` : '디지털 트윈 전송'}
           </button>
-        )}
+          {perm.create && (
+            <button
+              type="button"
+              onClick={openCreate}
+              className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm hover:bg-gray-800"
+            >
+              새 에셋 업로드
+            </button>
+          )}
+        </div>
       </div>
-      <div className="grid gap-3 md:grid-cols-[1fr_240px]">
-        <div className="relative">
+      <div className="flex gap-3 items-center">
+        <div className="relative flex-1">
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
             placeholder="에셋명 또는 유형으로 검색"
             className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 pr-11 text-sm focus:outline-none focus:border-blue-500"
           />
           <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400">⌕</span>
         </div>
-        <select
-          value={selectedCategoryId ?? ''}
-          onChange={(e) => setSelectedCategoryId(e.target.value ? Number(e.target.value) : undefined)}
-          className="rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm focus:outline-none focus:border-blue-500"
+        <FilterDropdown
+          label="카테고리"
+          value={selectedCategoryId != null ? String(selectedCategoryId) : 'all'}
+          options={[
+            { value: 'all', label: '전체' },
+            ...categories.map((c) => ({ value: String(c.id), label: c.name })),
+          ]}
+          onChange={(v) => { setSelectedCategoryId(v === 'all' ? undefined : Number(v)); setCurrentPage(1); }}
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <FilterDropdown
+          label="구분"
+          value={filterUploadMode}
+          options={[
+            { value: 'all', label: '전체' },
+            { value: 'convert', label: '변환' },
+            { value: 'direct', label: '일반' },
+          ]}
+          onChange={(v) => { setFilterUploadMode(v); setCurrentPage(1); }}
+          className="min-w-[90px]"
+        />
+        <FilterDropdown
+          label="처리 상태"
+          value={filterStatus}
+          options={[
+            { value: 'all', label: '전체' },
+            { value: 'done', label: '완료' },
+            { value: 'failed', label: '실패' },
+            { value: 'pending', label: '대기' },
+            { value: 'processing', label: '처리 중' },
+            { value: 'awaiting_crop', label: '영역 선택 대기' },
+          ]}
+          onChange={(v) => { setFilterStatus(v); setCurrentPage(1); }}
+          className="min-w-[120px]"
+        />
+        <FilterDropdown
+          label="파일 타입"
+          value={filterType}
+          options={[
+            { value: 'all', label: '전체' },
+            { value: 'point_cloud', label: '포인트 클라우드' },
+            { value: 'gaussian', label: '3DGS' },
+            { value: 'nerf', label: 'NeRF' },
+            { value: 'mesh', label: 'Mesh' },
+          ]}
+          onChange={(v) => { setFilterType(v); setCurrentPage(1); }}
+          className="min-w-[120px]"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            setSearch('');
+            setSelectedCategoryId(undefined);
+            setFilterUploadMode('all');
+            setFilterStatus('all');
+            setFilterType('all');
+            setCurrentPage(1);
+          }}
+          className="flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors"
         >
-          <option value="">전체 카테고리</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+            <path d="M3 3v5h5"/>
+          </svg>
+          초기화
+        </button>
       </div>
       <div className="text-sm text-gray-500">총 {filtered.length}건</div>
       {loading ? (
         <div className="py-20 text-center text-sm text-gray-400">목록을 불러오는 중입니다.</div>
       ) : filtered.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-gray-300 bg-white py-20 text-center text-sm text-gray-400">
+        <div className="rounded-2xl border border-dashed border-gray-300 bg-white py-20 text-center text-sm text-gray-400 min-w-0 w-full">
           표시할 에셋이 없습니다.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-2xl border border-gray-200 bg-white shadow-sm">
-          <table className="w-full min-w-[1040px] table-fixed text-sm">
+          <table className="w-full min-w-[1080px] table-fixed text-sm">
             <thead>
-              <tr className="bg-[#2d4a7a] text-white">
-                <th className="w-20 px-6 py-3 text-left font-medium">NO</th>
-                <th className="px-6 py-3 text-left font-medium">제목</th>
-                <th className="w-48 px-4 py-3 text-left font-medium">설명</th>
-                <th className="w-36 px-4 py-3 text-left font-medium">파일 타입</th>
-                <th className="w-32 px-4 py-3 text-left font-medium">카테고리</th>
-                <th className="w-36 px-4 py-3 text-left font-medium">처리 상태</th>
-                <th className="w-32 pl-4 pr-3 py-3 text-left font-medium">승인 상태</th>
+              <tr className="bg-[#2d4a7a] text-white divide-x divide-[#4a6a9a]">
+                <th className="w-12 px-3 py-3 text-center font-medium">
+                  {(() => {
+                    const allChecked =
+                      exportablePageIds.length > 0 && exportablePageIds.every((id) => checkedIds.has(id));
+                    const someChecked = exportablePageIds.some((id) => checkedIds.has(id));
+                    return (
+                      <input
+                        type="checkbox"
+                        checked={allChecked}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someChecked && !allChecked;
+                        }}
+                        onChange={(event) => {
+                          setCheckedIds((prev) => {
+                            const next = new Set(prev);
+                            if (event.target.checked) {
+                              exportablePageIds.forEach((id) => next.add(id));
+                            } else {
+                              exportablePageIds.forEach((id) => next.delete(id));
+                            }
+                            return next;
+                          });
+                        }}
+                        disabled={exportablePageIds.length === 0}
+                        className="accent-blue-600"
+                      />
+                    );
+                  })()}
+                </th>
+                <th className="w-14 px-3 py-3 text-center font-medium">NO</th>
+                <th className="w-20 px-3 py-3 text-center font-medium">구분</th>
+                <th className="w-56 px-4 py-3 text-left font-medium">제목</th>
+                <th className="w-72 px-4 py-3 text-left font-medium">설명</th>
+                <th className="w-28 px-3 py-3 text-center font-medium">파일 타입</th>
+                <th className="w-28 px-3 py-3 text-center font-medium">카테고리</th>
+                <th className="w-28 px-3 py-3 text-center font-medium">처리 상태</th>
+                <th className="w-24 px-3 py-3 text-center font-medium">승인 상태</th>
               </tr>
             </thead>
-            <tbody>
-              {filtered.map((asset, index) => (
-                <tr
-                  key={asset.id}
-                  onClick={() => {
-                    if (perm.detail) void openDetail(asset);
-                  }}
-                  className={perm.detail ? 'cursor-pointer transition-colors hover:bg-blue-50' : undefined}
-                >
-                  <td className="px-6 py-4 text-gray-500">{assetSequenceMap.get(asset.id) ?? index + 1}</td>
-                  <td className="px-6 py-4 font-semibold text-gray-900 truncate">{asset.name}</td>
-                  <td className="px-4 py-4 text-gray-600 truncate">{asset.description?.trim() || '-'}</td>
-                  <td className="px-4 py-4 text-gray-600 whitespace-nowrap">{ASSET_TYPE_LABELS[asset.type]}</td>
-                  <td className="px-4 py-4 text-gray-600 whitespace-nowrap">
-                    {getCategoryDisplayName(asset, categories)}
-                  </td>
-                  <td className="px-4 py-4">
-                    <StatusBadge status={asset.status} />
-                  </td>
-                  <td className="pl-4 pr-3 py-4">
-                    <span
-                      className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${asset.approved ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}
-                    >
-                      {asset.approved ? '승인됨' : '미승인'}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+            <tbody className="divide-y divide-gray-100">
+              {pagedAssets.map((asset, index) => {
+                const isDirect = isDirectUploadAsset(asset);
+                const assetId = String(asset.id);
+                const canExport = asset.status === 'done' && asset.approved;
+                const isChecked = checkedIds.has(assetId);
+                return (
+                  <tr
+                    key={asset.id}
+                    onClick={() => {
+                      if (perm.detail) void openDetail(asset);
+                    }}
+                    className={`divide-x divide-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${perm.detail ? 'cursor-pointer transition-colors hover:bg-blue-50' : ''}`}
+                  >
+                    <td className="px-3 py-4 text-center">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        disabled={!canExport}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => {
+                          setCheckedIds((prev) => {
+                            const next = new Set(prev);
+                            if (event.target.checked) next.add(assetId);
+                            else next.delete(assetId);
+                            return next;
+                          });
+                        }}
+                        className="accent-blue-600 disabled:opacity-40"
+                        title={canExport ? '디지털 트윈 전송 선택' : '완료 및 승인된 에셋만 전송할 수 있습니다.'}
+                      />
+                    </td>
+                    <td className="px-3 py-4 text-center text-gray-500">{assetSequenceMap.get(asset.id) ?? index + 1}</td>
+                    <td className="px-3 py-4 text-center">
+                      <span
+                        className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${isDirect ? 'bg-blue-100 text-blue-700' : 'bg-amber-100 text-amber-700'}`}
+                      >
+                        {isDirect ? '일반' : '변환'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-4 font-semibold text-gray-900 max-w-0 truncate" title={asset.name}>{asset.name}</td>
+                    <td className="px-4 py-4 text-gray-600 max-w-0 truncate" title={asset.description?.trim() || '-'}>{asset.description?.trim() || '-'}</td>
+                    <td className="px-3 py-4 text-center text-gray-600 whitespace-nowrap">{asset.type === 'gaussian' ? '3DGS' : ASSET_TYPE_LABELS[asset.type]}</td>
+                    <td className="px-3 py-4 text-center text-gray-600 whitespace-nowrap">
+                      {getCategoryDisplayName(asset, categories)}
+                    </td>
+                    <td className="px-3 py-4 text-center">
+                      <StatusBadge status={asset.status} />
+                    </td>
+                    <td className="px-3 py-4 text-center">
+                      <span
+                        className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${asset.approved ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}
+                      >
+                        {asset.approved ? '승인됨' : '미승인'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-1 pt-2">
+          <button
+            type="button"
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={safePage === 1}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {'‹'}
+          </button>
+          {(() => {
+            const pages: (number | '...')[] = [];
+            const blockStart = Math.floor((safePage - 1) / 5) * 5 + 1;
+            const blockEnd = Math.min(blockStart + 4, totalPages);
+            if (blockStart > 1) pages.push('...');
+            for (let i = blockStart; i <= blockEnd; i++) pages.push(i);
+            if (blockEnd < totalPages) pages.push('...');
+            return pages.map((p, i) =>
+              p === '...' ? (
+                <span key={`ellipsis-${i}`} className="flex h-9 w-9 items-center justify-center text-sm text-gray-400">…</span>
+              ) : (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setCurrentPage(p as number)}
+                  className={`flex h-9 w-9 items-center justify-center rounded-lg border text-sm font-medium transition-colors ${safePage === p ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}
+                >
+                  {p}
+                </button>
+              )
+            );
+          })()}
+          <button
+            type="button"
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={safePage === totalPages}
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-gray-300 bg-white text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {'›'}
+          </button>
         </div>
       )}
 
@@ -1661,6 +2022,26 @@ export default function AssetsPage() {
                     메시 텍스쳐
                   </button>
                 )}
+                {selected.status === 'failed' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRetry()}
+                    disabled={actionLoading === 'retry'}
+                    className="px-3 py-1.5 rounded-lg border border-green-300 text-green-700 text-sm hover:bg-green-50 disabled:opacity-40"
+                  >
+                    {actionLoading === 'retry' ? '요청 중...' : '재시도'}
+                  </button>
+                )}
+                {(selected.status === 'pending' || selected.status === 'processing') && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCancelJob()}
+                    disabled={actionLoading === 'cancel'}
+                    className="px-3 py-1.5 rounded-lg border border-orange-300 text-orange-700 text-sm hover:bg-orange-50 disabled:opacity-40"
+                  >
+                    {actionLoading === 'cancel' ? '중지 중...' : '작업 중지'}
+                  </button>
+                )}
                 {perm.delete && (
                   <button
                     type="button"
@@ -1675,30 +2056,11 @@ export default function AssetsPage() {
                 )}
               </div>
             </div>
-            <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr]">
-              <div className="space-y-4">
+            <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start">
+              <div className="flex flex-col gap-4">
                 {selectedProfile === 'mesh_interop_bundle' && (
                   <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
                     GLB, OBJ, STL, PLY 결과가 ZIP 컨테이너로 제공됩니다.
-                  </div>
-                )}
-                {selected.status === 'gpu_required' && (
-                  <div className="rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800 space-y-2">
-                    <p className="font-medium">⚠️ 이 변환 작업은 고성능 컴퓨터가 필요합니다.</p>
-                    <p className="text-xs text-orange-700">
-                      현재 이 컴퓨터의 성능이 부족해 변환을 완료할 수 없었습니다. 더 높은 사양의 컴퓨터에서 다시
-                      시도하거나 관리자에게 문의해 주세요.
-                    </p>
-                    {selected.errorMessage && (
-                      <details className="text-xs">
-                        <summary className="cursor-pointer text-orange-600 hover:text-orange-800">
-                          상세 정보 보기
-                        </summary>
-                        <pre className="whitespace-pre-wrap mt-1 text-orange-700 bg-orange-100 rounded-lg px-3 py-2 font-sans">
-                          {selected.errorMessage}
-                        </pre>
-                      </details>
-                    )}
                   </div>
                 )}
                 <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden">
@@ -1778,12 +2140,11 @@ export default function AssetsPage() {
                                 : GENERATION_QUALITY_HINTS[preset]
                             }
                             onClick={() => void handleRegenerateQuality(preset)}
-                            className={`flex-1 py-1.5 rounded-lg border text-sm font-medium transition-colors disabled:cursor-not-allowed
-                              ${preset === 'fast' ? 'border-sky-200 text-sky-700 bg-sky-50' : ''}
-                              ${preset === 'normal' ? 'border-gray-300 text-gray-700 bg-gray-50' : ''}
-                              ${preset === 'precise' ? 'border-violet-200 text-violet-700 bg-violet-50' : ''}
-                              ${isActive ? 'ring-2 ring-offset-1 ring-gray-300' : 'hover:bg-white'}
-                              ${disabled && !isActive ? 'opacity-50' : ''}
+                            className={`flex-1 py-1.5 rounded-lg border text-sm font-medium transition-all disabled:cursor-not-allowed
+                              ${isActive
+                                ? 'bg-blue-600 border-blue-600 text-white shadow-md'
+                                : 'bg-white border-gray-200 text-gray-400 hover:border-blue-300 hover:text-blue-500'}
+                              ${disabled && !isActive ? 'opacity-40' : ''}
                             `}
                           >
                             {isLoading ? '시작 중...' : GENERATION_QUALITY_LABELS[preset]}
@@ -1813,18 +2174,21 @@ export default function AssetsPage() {
                         <tbody>
                           {QUALITY_SPEC_ROWS[selected.type].map((row) => (
                             <tr key={row.label} className="border-t border-gray-100">
-                              <td className="text-gray-400 py-0.5 pr-2">{row.label}</td>
-                              {GENERATION_QUALITY_PRESETS.map((preset) => (
-                                <td
-                                  key={preset}
-                                  className={`text-center py-0.5 font-mono
-                                    ${preset === selectedGenerationQuality
-                                      ? 'text-red-500 font-bold border-x-2 border-b-2 border-red-400'
-                                      : 'text-gray-500'}`}
-                                >
-                                  {row.values[preset]}
-                                </td>
-                              ))}
+                              <td className="text-gray-400 py-0.5 pr-2 whitespace-pre-line leading-tight">{row.label}</td>
+                              {GENERATION_QUALITY_PRESETS.map((preset) => {
+                                const val = row.values[preset];
+                                const isX = val === '✕';
+                                return (
+                                  <td
+                                    key={preset}
+                                    className={`text-center py-0.5 font-mono
+                                      ${preset === selectedGenerationQuality ? 'border-x-2 border-b-2 border-red-400' : ''}
+                                      ${isX ? 'text-gray-300' : preset === selectedGenerationQuality ? 'text-red-500 font-bold' : 'text-gray-500'}`}
+                                  >
+                                    {val}
+                                  </td>
+                                );
+                              })}
                             </tr>
                           ))}
                         </tbody>
@@ -1834,13 +2198,13 @@ export default function AssetsPage() {
                       {selectedIsDirectUpload
                         ? '일반 업로드에서는 지원하지 않는 기능입니다. 이미 완성된 결과 파일이라 품질 재생성을 실행할 수 없습니다.'
                         : selected.status === 'done'
-                          ? '보통/정밀을 누르면 원본 파일 또는 저장된 COLMAP 결과로 다시 생성합니다.'
-                          : '완료된 에셋에서 보통/정밀 재생성을 실행할 수 있습니다.'}
+                          ? `${selectedGenerationQuality === 'fast' ? '보통/정밀' : selectedGenerationQuality === 'normal' ? '빠름/정밀' : '빠름/보통'}을 누르면 원본 파일 또는 저장된 COLMAP 결과로 다시 생성합니다.`
+                          : `완료된 에셋에서 ${selectedGenerationQuality === 'fast' ? '보통/정밀' : selectedGenerationQuality === 'normal' ? '빠름/정밀' : '빠름/보통'} 재생성을 실행할 수 있습니다.`}
                     </p>
                   </div>
                 )}
               </div>
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3">
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 h-full">
                 <div className="flex flex-wrap gap-2">
                   <StatusBadge status={selected.status} />
                   <span
@@ -1898,67 +2262,93 @@ export default function AssetsPage() {
                     <span className="text-gray-900 break-all">{selectedOutputObjectName}</span>
                   </div>
                   <div className="mt-2 space-y-2 border-t border-gray-100 pt-2">
-                    <span className="text-xs font-semibold text-gray-500">품질 지표</span>
-                    {(() => {
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-gray-500">품질 지표</span>
+                      <button
+                        onClick={() => setQualityMetricTab('psnr_ssim')}
+                        disabled={selected.type !== 'gaussian'}
+                        className={`px-2 py-0.5 rounded text-xs font-medium border transition-colors ${
+                          selected.type === 'gaussian'
+                            ? qualityMetricTab === 'psnr_ssim'
+                              ? 'bg-blue-50 border-blue-400 text-blue-700'
+                              : 'bg-white border-gray-300 text-gray-600 hover:border-blue-300 hover:text-blue-600'
+                            : 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                        }`}
+                        title={selected.type !== 'gaussian' ? '3DGS 파일일 때만 사용 가능합니다' : ''}
+                      >
+                        PSNR / SSIM
+                      </button>
+                      <button
+                        onClick={() => setQualityMetricTab('vra')}
+                        disabled={selected.type !== 'mesh'}
+                        className={`px-2 py-0.5 rounded text-xs font-medium border transition-colors ${
+                          selected.type === 'mesh'
+                            ? qualityMetricTab === 'vra'
+                              ? 'bg-purple-50 border-purple-400 text-purple-700'
+                              : 'bg-white border-gray-300 text-gray-600 hover:border-purple-300 hover:text-purple-600'
+                            : 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                        }`}
+                        title={selected.type !== 'mesh' ? 'Mesh 파일일 때만 사용 가능합니다' : ''}
+                      >
+                        VRA
+                      </button>
+                    </div>
+                    {qualityMetricTab === 'psnr_ssim' && selected.type === 'gaussian' && (() => {
                       const psnr = selected.metadata?.psnr as number | null | undefined;
-                      return (
-                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                          <span className="text-xs text-gray-500">PSNR (화질 손실량)</span>
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-sm font-medium text-gray-900">
-                              {selected.type === 'point_cloud'
-                                ? '측정 해당 없음'
-                                : psnr != null
-                                  ? `${psnr.toFixed(2)} dB`
-                                  : '-'}
-                            </span>
-                            {selected.type !== 'point_cloud' && (
-                              <span className="text-xs text-gray-400">목표 ≤ 27.00 dB</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()}
-                    {(() => {
                       const ssim = selected.metadata?.ssim as number | null | undefined;
                       return (
-                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                          <span className="text-xs text-gray-500">SSIM (이미지 유사성)</span>
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-sm font-medium text-gray-900">
-                              {selected.type === 'point_cloud'
-                                ? '측정 해당 없음'
-                                : ssim != null
-                                  ? `${(ssim * 100).toFixed(2)} %`
-                                  : '-'}
-                            </span>
-                            {selected.type !== 'point_cloud' && (
+                        <div className="space-y-1.5">
+                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                            <span className="text-xs text-gray-500">PSNR (화질 손실량)</span>
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-sm font-medium text-gray-900">
+                                {psnr != null ? `${psnr.toFixed(2)} dB` : '-'}
+                              </span>
+                              <span className="text-xs text-gray-400">목표 ≤ 27.00 dB</span>
+                            </div>
+                          </div>
+                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                            <span className="text-xs text-gray-500">SSIM (이미지 유사성)</span>
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-sm font-medium text-gray-900">
+                                {ssim != null ? `${(ssim * 100).toFixed(2)} %` : '-'}
+                              </span>
                               <span className="text-xs text-gray-400">목표 ≥ 83 %</span>
-                            )}
+                            </div>
                           </div>
                         </div>
                       );
                     })()}
-                    {(() => {
+                    {qualityMetricTab === 'vra' && selected.type === 'mesh' && (() => {
                       const vra = selected.metadata?.volumeRenderingAccuracy as number | null | undefined;
                       return (
-                        <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
-                          <span className="text-xs text-gray-500">볼륨 렌더링 변환 정확도</span>
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-sm font-medium text-gray-900">
-                              {selected.type === 'point_cloud'
-                                ? '측정 해당 없음'
-                                : vra != null
-                                  ? `${vra.toFixed(2)} mm`
-                                  : '-'}
-                            </span>
-                            {selected.type !== 'point_cloud' && (
+                        <div className="space-y-1.5">
+                          <div className="rounded-lg bg-blue-50 border border-blue-100 px-3 py-2">
+                            <p className="text-xs text-blue-600">
+                              Mesh 파일 편집기 VRA 치수 입력 시 정확도를 측정 할 수 있습니다.
+                            </p>
+                          </div>
+                          <div className="rounded-lg bg-gray-50 px-3 py-2 space-y-0.5">
+                            <span className="text-xs text-gray-500">볼륨 렌더링 변환 정확도</span>
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-sm font-medium text-gray-900">
+                                {vra != null ? `${vra.toFixed(2)} mm` : '-'}
+                              </span>
                               <span className="text-xs text-gray-400">목표 ≤ 15.00 mm</span>
-                            )}
+                            </div>
                           </div>
                         </div>
                       );
                     })()}
+                    {qualityMetricTab === null && (
+                      <p className="text-xs text-gray-400 px-1">
+                        {selected.type === 'gaussian'
+                          ? 'PSNR / SSIM 버튼을 클릭하면 품질 지표를 확인할 수 있습니다.'
+                          : selected.type === 'mesh'
+                            ? 'VRA 버튼을 클릭하면 볼륨 렌더링 정확도를 확인할 수 있습니다.'
+                            : '이 파일 유형은 품질 지표를 지원하지 않습니다.'}
+                      </p>
+                    )}
                   </div>
                   {selected.errorMessage && <div className="text-red-600">{selected.errorMessage}</div>}
                 </div>
@@ -2174,6 +2564,10 @@ export default function AssetsPage() {
             representativeSceneObject={selected.metadata?.representativeSceneObject ?? null}
             onSaveCalibration={handleSaveCalibration}
             onSaveVra={handleSaveVra}
+            initialGdtAnnotations={selected.metadata?.gdtAnnotations ?? []}
+            initialVraPoints={selected.metadata?.vraPoints ?? []}
+            onSaveGdtAnnotations={handleSaveGdtAnnotations}
+            onSaveVraPoints={handleSaveVraPoints}
             onSaveEdit={handleSaveCroppedScene}
             onSaveExtractedAsset={handleCreateExtractedAsset}
             getSceneUrl={assetsApi.getStreamUrl}

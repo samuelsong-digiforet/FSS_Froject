@@ -1,6 +1,5 @@
 import os
 import json
-import struct
 import tempfile
 import time
 import redis
@@ -26,10 +25,34 @@ MIME_MAP = {
 
 # GPU 학습이 필요한 타입
 GPU_INTENSIVE_TYPES = {"gaussian", "nerf", "mesh"}
+TEXTURE_SLOTS = (
+    "image",
+    "baseColorTexture",
+    "metallicRoughnessTexture",
+    "normalTexture",
+    "occlusionTexture",
+    "emissiveTexture",
+)
 
 # 최소 GPU 요구 사양
 MIN_COMPUTE_CAPABILITY = (7, 0)   # Volta 이상 (RTX 20xx, V100, ...)
 MIN_VRAM_GB = 6.0
+MIN_RUNTIME_CPU = "Intel Core i7"
+MIN_RUNTIME_GPU = "NVIDIA GeForce RTX 3090"
+MIN_RUNTIME_RAM_GB = 16
+
+
+def format_runtime_requirements() -> str:
+    return (
+        "[구동 기준 PC]\n"
+        f"• CPU: {MIN_RUNTIME_CPU} 이상\n"
+        f"• GPU: {MIN_RUNTIME_GPU} 이상\n"
+        f"• RAM: {MIN_RUNTIME_RAM_GB}GB 이상\n\n"
+        "[필수 CUDA 조건]\n"
+        f"• NVIDIA GPU (Compute Capability {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상)\n"
+        f"• VRAM {MIN_VRAM_GB:.0f}GB 이상\n"
+        "• CUDA 11.8 이상"
+    )
 
 
 def get_redis():
@@ -41,8 +64,8 @@ class AwaitingCropException(Exception):
     pass
 
 
-class GpuRequiredException(Exception):
-    """GPU 사양 미달로 처리 불가능한 경우 발생"""
+class ConversionEnvironmentException(Exception):
+    """GPU/CUDA 환경 문제로 처리 불가능한 경우 발생"""
     pass
 
 
@@ -62,16 +85,14 @@ def check_gpu_requirements(asset_type: str) -> tuple:
     if not torch.cuda.is_available():
         return False, (
             "NVIDIA GPU를 감지할 수 없습니다.\n\n"
-            "[최소 요구 사양]\n"
-            f"• NVIDIA GPU (Compute Capability {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상)\n"
-            f"• VRAM {MIN_VRAM_GB:.0f}GB 이상\n"
-            "• CUDA 11.8 이상"
+            f"{format_runtime_requirements()}"
         )
 
     try:
         props = torch.cuda.get_device_properties(0)
         cc = (props.major, props.minor)
         vram_gb = props.total_memory / (1024 ** 3)
+        vram_display_gb = float(f"{vram_gb:.1f}")
         gpu_name = props.name
 
         issues = []
@@ -80,8 +101,8 @@ def check_gpu_requirements(asset_type: str) -> tuple:
                 f"• 연산 능력(Compute Capability): {cc[0]}.{cc[1]} "
                 f"(최소 {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상 필요)"
             )
-        if vram_gb < MIN_VRAM_GB:
-            issues.append(f"• VRAM: {vram_gb:.1f}GB (최소 {MIN_VRAM_GB:.0f}GB 이상 필요)")
+        if vram_display_gb < MIN_VRAM_GB:
+            issues.append(f"• VRAM: {vram_display_gb:.1f}GB (최소 {MIN_VRAM_GB:.0f}GB 이상 필요)")
 
         if issues:
             msg = (
@@ -89,12 +110,9 @@ def check_gpu_requirements(asset_type: str) -> tuple:
                 f"[현재 GPU 사양]\n"
                 f"• 모델: {gpu_name}\n"
                 f"• 연산 능력(Compute Capability): {cc[0]}.{cc[1]}\n"
-                f"• VRAM: {vram_gb:.1f}GB\n\n"
+                f"• VRAM: {vram_display_gb:.1f}GB\n\n"
                 f"[미달 항목]\n" + "\n".join(issues) + "\n\n"
-                f"[최소 요구 사양]\n"
-                f"• NVIDIA GPU (Compute Capability {MIN_COMPUTE_CAPABILITY[0]}.{MIN_COMPUTE_CAPABILITY[1]} 이상)\n"
-                f"• VRAM {MIN_VRAM_GB:.0f}GB 이상\n"
-                "• CUDA 11.8 이상"
+                f"{format_runtime_requirements()}"
             )
             return False, msg
 
@@ -105,6 +123,16 @@ def check_gpu_requirements(asset_type: str) -> tuple:
             f"GPU 정보 확인 중 오류가 발생했습니다: {e}\n"
             "NVIDIA GPU 및 CUDA 환경을 확인해 주세요."
         )
+
+
+def job_requires_gpu(asset_type: str | None, source_obj: str | None, stage: str | None) -> bool:
+    if stage == "regenerate_preview":
+        return False
+    if stage == "stage2":
+        return asset_type in GPU_INTENSIVE_TYPES
+
+    ext = os.path.splitext(source_obj or "")[-1].lower()
+    return asset_type in {"gaussian", "nerf"} or (asset_type == "mesh" and ext in TWO_STAGE_EXTS)
 
 
 PLY_SCALAR_FORMATS = {
@@ -242,9 +270,6 @@ def _compute_ply_preview_stats(ply_path: str):
 
 def _run_regenerate_preview(asset_id: str, data: dict, tmpdir: str):
     """기존 ZIP outputObject에서 GLB 미리보기를 재생성하여 previewObject 갱신"""
-    import zipfile
-    import glob as glob_module
-
     output_object = data.get("outputObject", "")
     if not output_object.endswith(".zip"):
         print(f"[Worker][RegenPreview] ZIP이 아닌 파일 — 건너뜀: {output_object}")
@@ -284,6 +309,98 @@ def _upload_textures_from_zip(asset_id: str, zip_path: str, tmpdir: str) -> list
     return texture_objects
 
 
+def _upload_textures_from_glb(asset_id: str, glb_path: str, tmpdir: str) -> list:
+    """GLB 파일에서 임베드된 텍스쳐를 추출해 MinIO에 업로드하고 경로 리스트 반환"""
+    texture_objects = []
+    try:
+        import trimesh
+        scene = trimesh.load(glb_path, force="scene")
+        if not isinstance(scene, trimesh.Scene) or len(scene.geometry) == 0:
+            return texture_objects
+
+        tex_dir = os.path.join(tmpdir, "glb_textures")
+        os.makedirs(tex_dir, exist_ok=True)
+        idx = 0
+
+        def _save_and_upload(img, suffix=""):
+            nonlocal idx
+            if img is None:
+                return
+            img_path = os.path.join(tex_dir, f"texture_{idx}{suffix}.png")
+            try:
+                img.save(img_path)
+                object_name = f"textures/{asset_id}/texture_{idx}{suffix}.png"
+                upload_object(img_path, object_name, "image/png")
+                texture_objects.append(object_name)
+                idx += 1
+            except Exception as e_save:
+                print(f"[Worker] GLB 텍스처 저장 실패: {e_save}")
+
+        for _name, geom in scene.geometry.items():
+            visual = getattr(geom, 'visual', None)
+            if visual is None:
+                continue
+            mat = getattr(visual, 'material', None)
+            if mat is None:
+                continue
+            _save_and_upload(getattr(mat, 'image', None))
+            for slot in ('baseColorTexture', 'metallicRoughnessTexture', 'normalTexture'):
+                tex = getattr(mat, slot, None)
+                if tex is not None:
+                    _save_and_upload(getattr(tex, 'image', None) if hasattr(tex, 'image') else tex,
+                                     suffix=f"_{slot}")
+
+        if texture_objects:
+            print(f"[Worker] GLB에서 텍스쳐 {len(texture_objects)}개 업로드 완료")
+    except Exception as e:
+        print(f"[Worker] GLB 텍스쳐 추출 실패 (무시): {e}")
+    return texture_objects
+
+
+def _texture_slot_has_image(value) -> bool:
+    if value is None:
+        return False
+    if hasattr(value, "image"):
+        return _texture_slot_has_image(getattr(value, "image", None))
+    return hasattr(value, "save")
+
+
+def _scene_has_image_texture(scene_or_mesh) -> bool:
+    try:
+        import trimesh
+
+        if isinstance(scene_or_mesh, trimesh.Scene):
+            geometries = scene_or_mesh.geometry.values()
+        elif isinstance(scene_or_mesh, trimesh.Trimesh):
+            geometries = [scene_or_mesh]
+        else:
+            return False
+
+        for geom in geometries:
+            visual = getattr(geom, "visual", None)
+            mat = getattr(visual, "material", None)
+            if mat is None:
+                continue
+            for slot in TEXTURE_SLOTS:
+                if _texture_slot_has_image(getattr(mat, slot, None)):
+                    return True
+        return False
+    except Exception as e:
+        print(f"[Worker] GLB texture inspection failed: {e}")
+        return False
+
+
+def _glb_has_image_texture(glb_path: str) -> bool:
+    try:
+        import trimesh
+
+        scene = trimesh.load(glb_path, force="scene")
+        return _scene_has_image_texture(scene)
+    except Exception as e:
+        print(f"[Worker] GLB texture inspection failed: {e}")
+        return False
+
+
 def _tar_directory(src_dir: str, tmpdir: str, tar_name: str) -> str:
     """디렉터리를 tar로 압축 (gz 생략 — MinIO 임시 저장이므로 압축 불필요)"""
     import tarfile as tarfile_mod
@@ -316,10 +433,14 @@ def _upload_glb_preview_from_zip(asset_id: str, zip_path: str, tmpdir: str):
         glb_path = os.path.join(tmpdir, "preview.glb")
 
         # GLB는 texture가 임베드되어 있으므로 최우선 사용
-        glb_files = glob_module.glob(os.path.join(preview_dir, "*.glb"))
-        if glb_files:
+        glb_files = sorted(glob_module.glob(os.path.join(preview_dir, "*.glb")))
+        obj_files = sorted(glob_module.glob(os.path.join(preview_dir, "*.obj")))
+        ply_files = sorted(glob_module.glob(os.path.join(preview_dir, "*.ply")))
+        for candidate_glb in glb_files:
+            if not _glb_has_image_texture(candidate_glb):
+                continue
             import shutil as _shutil
-            _shutil.copy(glb_files[0], glb_path)
+            _shutil.copy(candidate_glb, glb_path)
             print(f"[Worker] ZIP 내 GLB 발견, 직접 사용: {os.path.basename(glb_files[0])}")
             preview_object = f"previews/{asset_id}/output.glb"
             upload_object(glb_path, preview_object, "model/gltf-binary")
@@ -327,8 +448,17 @@ def _upload_glb_preview_from_zip(asset_id: str, zip_path: str, tmpdir: str):
             print(f"[Worker] GLB 미리보기 업로드 완료 → {preview_object}")
             return
 
-        obj_files = glob_module.glob(os.path.join(preview_dir, "*.obj"))
-        ply_files = glob_module.glob(os.path.join(preview_dir, "*.ply"))
+        if glb_files and obj_files:
+            print("[Worker] ZIP GLB has no embedded texture; rebuilding preview from OBJ/MTL")
+        elif glb_files and not obj_files and not ply_files:
+            import shutil as _shutil
+            _shutil.copy(glb_files[0], glb_path)
+            print(f"[Worker] ZIP GLB has no embedded texture and no OBJ fallback, using GLB: {os.path.basename(glb_files[0])}")
+            preview_object = f"previews/{asset_id}/output.glb"
+            upload_object(glb_path, preview_object, "model/gltf-binary")
+            _update_preview_object_keep_status(asset_id, preview_object)
+            print(f"[Worker] GLB 미리보기 업로드 완료 → {preview_object}")
+            return
 
         source_file = None
         if obj_files:
@@ -344,6 +474,8 @@ def _upload_glb_preview_from_zip(asset_id: str, zip_path: str, tmpdir: str):
         try:
             scene = trimesh.load(source_file, force="scene")
             scene.export(glb_path)
+            if source_file.lower().endswith(".obj") and not _glb_has_image_texture(glb_path):
+                print("[Worker] WARNING: OBJ preview conversion produced a GLB without embedded texture")
             print(f"[Worker] GLB 변환 완료: {source_file} → {glb_path}")
         except Exception as conv_err:
             print(f"[Worker] GLB 변환 실패: {conv_err} — 원본 파일을 미리보기로 업로드")
@@ -447,6 +579,7 @@ def main():
                 continue
 
             data = json.loads(job_data_raw)
+            asset_id = data.get("assetId")
 
             try:
                 output_object = process_job(job_id, data)
@@ -463,17 +596,16 @@ def main():
                 r.lrem(active_key, 1, job_id)
                 r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "awaiting_crop"}), "finishedOn": int(time.time() * 1000)})
                 continue
-            except GpuRequiredException as gpu_err:
-                # GPU 사양 미달: gpu_required 상태로 종료 (실패 아님)
-                print(f"[Worker] GPU 요구사항 미달 — job {job_id} 중단")
+            except ConversionEnvironmentException as gpu_err:
+                # GPU/CUDA 환경 문제: 변환 실패로 종료
+                print(f"[Worker] GPU 요구사항 미달 — job {job_id} 중단: {gpu_err}")
                 if asset_id:
-                    update_asset_status(asset_id, "gpu_required")
+                    update_asset_status(asset_id, "failed", error_message=str(gpu_err))
                 r.lrem(active_key, 1, job_id)
-                r.hset(job_key, mapping={"returnvalue": json.dumps({"status": "gpu_required"}), "finishedOn": int(time.time() * 1000)})
+                r.hset(job_key, mapping={"failedReason": str(gpu_err), "finishedOn": int(time.time() * 1000)})
                 continue
             except Exception as job_err:
                 import traceback
-                asset_id = data.get("assetId")
                 if str(job_err) == "__asset_deleted__":
                     print(f"[Worker] Asset {asset_id} 삭제로 인해 job {job_id} 중단")
                 else:
@@ -506,8 +638,14 @@ def process_job(job_id: str, data: dict) -> str:
     source_obj = data.get("sourceObject")
     output_profile = data.get("outputProfile")
     quality_preset = data.get("qualityPreset", "fast")
+    stage = data.get("stage")
 
     print(f"[Worker] Processing job {job_id} -- asset: {asset_id}, type: {asset_type}, profile: {output_profile}, quality: {quality_preset}")
+
+    if job_requires_gpu(asset_type, source_obj, stage):
+        ok, message = check_gpu_requirements(asset_type)
+        if not ok:
+            raise ConversionEnvironmentException(message)
 
     def on_progress(pct: int):
         update_asset_progress(asset_id, pct)
@@ -516,7 +654,7 @@ def process_job(job_id: str, data: dict) -> str:
     def stop_check() -> bool:
         return is_asset_deleted(asset_id)
 
-    if data.get("stage") == "regenerate_preview":
+    if stage == "regenerate_preview":
         with tempfile.TemporaryDirectory() as tmpdir:
             _run_regenerate_preview(asset_id, data, tmpdir)
         print(f"[Worker] Job {job_id} regenerate_preview done")
@@ -527,7 +665,7 @@ def process_job(job_id: str, data: dict) -> str:
     with tempfile.TemporaryDirectory() as tmpdir:
         metrics: dict = {}
 
-        if data.get("stage") == "stage2":
+        if stage == "stage2":
             on_progress(55)
             output_object = _run_stage2(asset_id, asset_type, data, tmpdir, on_progress, stop_check=stop_check, metrics_out=metrics, quality_preset=quality_preset)
         else:
@@ -564,6 +702,10 @@ def process_job(job_id: str, data: dict) -> str:
                     _upload_glb_preview_from_zip(asset_id, output_path, tmpdir)
                 if asset_type == "mesh" and output_path.endswith(".zip"):
                     tex = _upload_textures_from_zip(asset_id, output_path, tmpdir)
+                    if tex:
+                        update_texture_objects(asset_id, tex)
+                elif asset_type == "mesh" and output_path.endswith(".glb"):
+                    tex = _upload_textures_from_glb(asset_id, output_path, tmpdir)
                     if tex:
                         update_texture_objects(asset_id, tex)
 
@@ -672,6 +814,10 @@ def _run_stage2(asset_id: str, asset_type: str, data: dict, tmpdir: str, on_prog
         _upload_glb_preview_from_zip(asset_id, output_path, tmpdir)
     if asset_type == "mesh" and output_path.endswith(".zip"):
         tex = _upload_textures_from_zip(asset_id, output_path, tmpdir)
+        if tex:
+            update_texture_objects(asset_id, tex)
+    elif asset_type == "mesh" and output_path.endswith(".glb"):
+        tex = _upload_textures_from_glb(asset_id, output_path, tmpdir)
         if tex:
             update_texture_objects(asset_id, tex)
     return output_object

@@ -15,6 +15,7 @@ import {
 import type { Response } from 'express';
 import { AssetsService } from './assets.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
+import { ExportAssetsDto } from './dto/export-assets.dto';
 import { CreateAssetObbVersionDto } from './dto/create-asset-obb-version.dto';
 import { RegenerateAssetDto } from './dto/regenerate-asset.dto';
 import { UpdateAssetObbVersionDto } from './dto/update-asset-obb-version.dto';
@@ -32,6 +33,12 @@ export class AssetsController {
   @Log('에셋 관리', '생성')
   create(@Body() dto: CreateAssetDto, @Req() req: { user: User }) {
     return this.assetsService.create(dto, req.user.id);
+  }
+
+  @Post('export')
+  @Log('Asset Management', 'Export to Digital Twin')
+  exportToExternal(@Body() dto: ExportAssetsDto, @Req() req: { user: User }) {
+    return this.assetsService.exportToExternal(dto.assetIds, req.user.id);
   }
 
   @Get()
@@ -177,6 +184,12 @@ export class AssetsController {
     @Res() res: Response,
   ) {
     await this.assetsService.streamOutputArtifact(id, req.user.id, format, res);
+  }
+
+  @Post(':id/cancel')
+  @Log('에셋 관리', '작업 중지')
+  cancelJob(@Param('id', ParseIntPipe) id: number, @Req() req: { user: User }) {
+    return this.assetsService.cancelJob(id, req.user.id);
   }
 
   @Delete(':id')

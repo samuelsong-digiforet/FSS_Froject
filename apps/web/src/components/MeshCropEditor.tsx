@@ -30,11 +30,11 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Canvas, useThree, useFrame } from '@react-three/fiber';
-import { TransformControls, OrbitControls, useGLTF, Html, Environment } from '@react-three/drei';
+import { TransformControls, OrbitControls, useGLTF, Html, Environment, Line } from '@react-three/drei';
 import { DropInViewer, RenderMode, SceneFormat } from '@mkkellogg/gaussian-splats-3d';
 import * as THREE from 'three';
 
-import type { AssetObbVersion, AssetType } from '@/api/assets';
+import type { AssetGdtAnnotation, AssetObbVersion, AssetType, AssetVraPoint } from '@/api/assets';
 
 export interface ObbParams {
   center: [number, number, number];
@@ -45,6 +45,47 @@ export interface ObbParams {
 export interface CropConfirmParams extends ObbParams {
   previewCenter: [number, number, number];
   previewBounds: [number, number, number];
+}
+
+type EditorGdtAnnotation = {
+  id: string;
+  position: THREE.Vector3;
+  type: string;
+  tolerance: string;
+};
+
+function toEditorGdtAnnotations(annotations: AssetGdtAnnotation[] | undefined): EditorGdtAnnotation[] {
+  const source = Array.isArray(annotations) ? annotations : [];
+  return source
+    .filter((annotation) => Array.isArray(annotation.position) && annotation.position.length === 3)
+    .map((annotation) => ({
+      id: annotation.id,
+      position: new THREE.Vector3(...annotation.position),
+      type: annotation.type,
+      tolerance: annotation.tolerance,
+    }));
+}
+
+function toAssetGdtAnnotations(annotations: EditorGdtAnnotation[]): AssetGdtAnnotation[] {
+  return annotations.map((annotation) => ({
+    id: annotation.id,
+    position: [annotation.position.x, annotation.position.y, annotation.position.z] as [number, number, number],
+    type: annotation.type,
+    tolerance: annotation.tolerance,
+  }));
+}
+
+function normalizeVraPoints(points: AssetVraPoint[] | undefined): AssetVraPoint[] {
+  const source = Array.isArray(points) ? points : [];
+  return source.map((point) => {
+    const measured = Number(point.measured);
+    return {
+      measured: Number.isFinite(measured) ? measured : 0,
+      actual: String(point.actual ?? ''),
+      p1: point.p1,
+      p2: point.p2,
+    };
+  });
 }
 
 interface PlyData {
@@ -86,6 +127,15 @@ interface MeshCutSelection {
   removedFaceCount: number;
   highlightGroup: THREE.Group;
   patches: MeshCutPatch[];
+}
+
+const DEFAULT_ANNOTATION_MARKER_RADIUS = 0.012;
+const ANNOTATION_MARKER_RADIUS_RATIO = 0.006;
+
+function getAnnotationMarkerRadius(extX: number, extY: number, extZ: number): number {
+  const diagonal = Math.sqrt(extX * extX + extY * extY + extZ * extZ);
+  if (!Number.isFinite(diagonal) || diagonal <= 0) return DEFAULT_ANNOTATION_MARKER_RADIUS;
+  return diagonal * ANNOTATION_MARKER_RADIUS_RATIO;
 }
 
 type CutSelection = PointCutSelection | MeshCutSelection;
@@ -1304,13 +1354,13 @@ function GlbMesh({
 }
 
 // ── 거리 측정 마커 + 라인 ────────────────────────────────────────
-function MeasureMarkers({ pts }: { pts: THREE.Vector3[] }) {
+function MeasureMarkers({ pts, markerRadius }: { pts: THREE.Vector3[]; markerRadius: number }) {
   if (pts.length === 0) return null;
   return (
     <>
       {pts.map((p, i) => (
         <mesh key={i} position={p}>
-          <sphereGeometry args={[0.012, 12, 12]} />
+          <sphereGeometry args={[markerRadius, 12, 12]} />
           <meshBasicMaterial color={i === 0 ? '#facc15' : '#f97316'} />
         </mesh>
       ))}
@@ -1320,6 +1370,51 @@ function MeasureMarkers({ pts }: { pts: THREE.Vector3[] }) {
           const geo = new THREE.BufferGeometry().setFromPoints(points);
           return <primitive object={new THREE.Line(geo, new THREE.LineBasicMaterial({ color: '#facc15' }))} />;
         })()}
+    </>
+  );
+}
+
+// ── VRA 저장된 측정 마커 + 라인 ──────────────────────────────────
+function VraMarkers({ points, markerRadius, lineWidth }: { points: AssetVraPoint[]; markerRadius: number; lineWidth: number }) {
+  if (points.length === 0) return null;
+  return (
+    <>
+      {points.map((vp, i) => {
+        if (!vp.p1 || !vp.p2) return null;
+        const a = new THREE.Vector3(...vp.p1);
+        const b = new THREE.Vector3(...vp.p2);
+        const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+        return (
+          <group key={i}>
+            <mesh position={a}>
+              <sphereGeometry args={[markerRadius, 10, 10]} />
+              <meshBasicMaterial color="#38bdf8" />
+            </mesh>
+            <mesh position={b}>
+              <sphereGeometry args={[markerRadius, 10, 10]} />
+              <meshBasicMaterial color="#38bdf8" />
+            </mesh>
+            <Line points={[a, b]} color="#38bdf8" lineWidth={lineWidth} />
+            <Html position={mid} center>
+              <div
+                style={{
+                  background: 'rgba(14,165,233,0.85)',
+                  color: '#fff',
+                  fontWeight: 700,
+                  fontSize: 11,
+                  borderRadius: 4,
+                  padding: '1px 5px',
+                  pointerEvents: 'none',
+                  whiteSpace: 'nowrap',
+                  userSelect: 'none',
+                }}
+              >
+                {i + 1}
+              </div>
+            </Html>
+          </group>
+        );
+      })}
     </>
   );
 }
@@ -1340,12 +1435,14 @@ const GDT_SYMBOLS: Record<string, string> = {
 
 function GdtMarkers({
   annotations,
+  markerRadius,
   editingId,
   onEdit,
   onOpenEdit,
   onDelete,
 }: {
-  annotations: { id: string; position: THREE.Vector3; type: string; tolerance: string }[];
+  annotations: EditorGdtAnnotation[];
+  markerRadius: number;
   editingId: string | null;
   onEdit: (id: string) => void; // 드롭다운 토글
   onOpenEdit: (id: string) => void; // 수정 모달 열기
@@ -1357,10 +1454,10 @@ function GdtMarkers({
       {annotations.map((a) => (
         <group key={a.id} position={a.position}>
           <mesh>
-            <sphereGeometry args={[0.012, 12, 12]} />
+            <sphereGeometry args={[markerRadius, 12, 12]} />
             <meshBasicMaterial color="#c084fc" />
           </mesh>
-          <Html distanceFactor={6} center>
+          <Html center>
             <div style={{ position: 'relative' }}>
               <div
                 onClick={() => onEdit(a.id)}
@@ -1475,6 +1572,8 @@ function EditorScene({
   cutSelection,
   glbResetKey,
   forceShowSplat,
+  annotationMarkerRadius,
+  annotationMoveMode,
   gdtMode,
   gdtVisible,
   gdtAnnotations,
@@ -1483,6 +1582,9 @@ function EditorScene({
   onGdtEdit,
   onGdtOpenEdit,
   onGdtDelete,
+  vraMode,
+  vraPoints,
+  vraLineWidth,
 }: {
   flyUrl: string;
   obb: ObbParams;
@@ -1507,14 +1609,19 @@ function EditorScene({
   cutSelection: CutSelection | null;
   glbResetKey: number;
   forceShowSplat?: boolean;
+  annotationMarkerRadius: number;
+  annotationMoveMode: boolean;
   gdtMode: boolean;
   gdtVisible: boolean;
-  gdtAnnotations: { id: string; position: THREE.Vector3; type: string; tolerance: string }[];
+  gdtAnnotations: EditorGdtAnnotation[];
   onGdtClick: (pt: THREE.Vector3) => void;
   gdtEditingId: string | null;
   onGdtEdit: (id: string) => void;
   onGdtOpenEdit: (id: string) => void;
   onGdtDelete: (id: string) => void;
+  vraMode: boolean;
+  vraPoints: AssetVraPoint[];
+  vraLineWidth: number;
 }) {
   const { camera, raycaster, gl } = useThree();
   const [dragging, setDragging] = useState(false);
@@ -1535,7 +1642,7 @@ function EditorScene({
 
   // 측정 모드 클릭: PLY(Points) 또는 GLB(Mesh) 모두 지원
   useEffect(() => {
-    if (!measureMode) return;
+    if (!measureMode || gdtMode || annotationMoveMode) return;
     const canvas = gl.domElement;
 
     const handleClick = (e: MouseEvent) => {
@@ -1583,11 +1690,11 @@ function EditorScene({
 
     canvas.addEventListener('click', handleClick);
     return () => canvas.removeEventListener('click', handleClick);
-  }, [measureMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onMeasureClick]);
+  }, [measureMode, gdtMode, annotationMoveMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onMeasureClick]);
 
   // GD&T 모드 클릭
   useEffect(() => {
-    if (!gdtMode) return;
+    if (!gdtMode || annotationMoveMode) return;
     const canvas = gl.domElement;
     const handleClick = (e: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
@@ -1623,7 +1730,7 @@ function EditorScene({
     };
     canvas.addEventListener('click', handleClick);
     return () => canvas.removeEventListener('click', handleClick);
-  }, [gdtMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onGdtClick]);
+  }, [gdtMode, annotationMoveMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onGdtClick]);
 
   return (
     <>
@@ -1689,10 +1796,12 @@ function EditorScene({
         </points>
       )}
       {cutSelection?.kind === 'mesh' && <primitive object={cutSelection.highlightGroup} />}
-      <MeasureMarkers pts={measurePts} />
+      <MeasureMarkers pts={measurePts} markerRadius={annotationMarkerRadius} />
+      {vraMode && vraPoints.length > 0 && <VraMarkers points={vraPoints} markerRadius={annotationMarkerRadius} lineWidth={vraLineWidth} />}
       {gdtVisible && (
         <GdtMarkers
           annotations={gdtAnnotations}
+          markerRadius={annotationMarkerRadius}
           editingId={gdtEditingId}
           onEdit={onGdtEdit}
           onOpenEdit={onGdtOpenEdit}
@@ -1702,9 +1811,17 @@ function EditorScene({
       <OrbitControls
         makeDefault
         enabled={!dragging && !cutMode}
-        enableRotate={!measureMode && !cutMode && !gdtMode}
+        enableRotate={(!measureMode || (vraMode && annotationMoveMode)) && !cutMode && !gdtMode}
         mouseButtons={{
-          LEFT: measureMode || cutMode || gdtMode ? undefined : THREE.MOUSE.ROTATE,
+          LEFT: cutMode
+            ? undefined
+            : vraMode && annotationMoveMode
+              ? THREE.MOUSE.ROTATE
+              : annotationMoveMode
+                ? THREE.MOUSE.PAN
+                : measureMode || gdtMode
+                  ? undefined
+                  : THREE.MOUSE.ROTATE,
           MIDDLE: THREE.MOUSE.DOLLY,
           RIGHT: cutMode ? undefined : THREE.MOUSE.PAN,
         }}
@@ -2450,6 +2567,10 @@ export default function MeshCropEditor({
   onDraftObbChange,
   onSaveCalibration,
   onSaveVra,
+  initialGdtAnnotations,
+  initialVraPoints,
+  onSaveGdtAnnotations,
+  onSaveVraPoints,
   onConfirm,
   onClose,
   loading,
@@ -2476,7 +2597,11 @@ export default function MeshCropEditor({
     calibrationReferenceLength: number,
     calibrationMeasuredLength: number,
   ) => Promise<void> | void;
-  onSaveVra?: (vra: number) => Promise<void> | void;
+  onSaveVra?: (vra: number, points: AssetVraPoint[]) => Promise<void> | void;
+  initialGdtAnnotations?: AssetGdtAnnotation[];
+  initialVraPoints?: AssetVraPoint[];
+  onSaveGdtAnnotations?: (annotations: AssetGdtAnnotation[]) => Promise<void> | void;
+  onSaveVraPoints?: (points: AssetVraPoint[]) => Promise<void> | void;
   onConfirm?: (obb: CropConfirmParams | null) => void;
   onClose: () => void;
   loading: boolean;
@@ -2508,13 +2633,15 @@ export default function MeshCropEditor({
   const [calibrationUnit, setCalibrationUnit] = useState<'m' | 'cm' | 'mm'>('m');
   const [calibrationSaving, setCalibrationSaving] = useState(false);
   const [vraMode, setVraMode] = useState(false);
-  const [vraPoints, setVraPoints] = useState<{ measured: number; actual: string }[]>([]);
+  const [vraPoints, setVraPoints] = useState<AssetVraPoint[]>(() => normalizeVraPoints(initialVraPoints));
+  const [vraLineWidth, setVraLineWidth] = useState(2);
   const [vraSaving, setVraSaving] = useState(false);
   const [gdtMode, setGdtMode] = useState(false);
   const [gdtVisible, setGdtVisible] = useState(true);
-  const [gdtAnnotations, setGdtAnnotations] = useState<
-    { id: string; position: THREE.Vector3; type: string; tolerance: string }[]
-  >([]);
+  const [gdtAnnotations, setGdtAnnotations] = useState<EditorGdtAnnotation[]>(() =>
+    toEditorGdtAnnotations(initialGdtAnnotations),
+  );
+  const [annotationMarkerRadius, setAnnotationMarkerRadius] = useState(DEFAULT_ANNOTATION_MARKER_RADIUS);
   const [gdtPending, setGdtPending] = useState<THREE.Vector3 | null>(null);
   const [gdtSelected, setGdtSelected] = useState<string | null>(null); // 드롭다운
   const [gdtEditing, setGdtEditing] = useState<string | null>(null); // 수정 모달
@@ -2524,6 +2651,7 @@ export default function MeshCropEditor({
   const [cutMode, setCutMode] = useState(false);
   const [cutStroke, setCutStroke] = useState<StrokePoint[]>([]);
   const [isCutDragging, setIsCutDragging] = useState(false);
+  const [annotationMoveMode, setAnnotationMoveMode] = useState(false);
   const isCutDraggingRef = useRef(false); // state 스테일 클로저 방지용 ref
   const [cutSelectionPreview, setCutSelectionPreview] = useState<CutSelection | null>(null);
   const [glbResetKey, setGlbResetKey] = useState(0);
@@ -2555,6 +2683,8 @@ export default function MeshCropEditor({
   const cutSelectionRef = useRef<CutSelection | null>(null);
   const generatedMeshGeometriesRef = useRef<Set<THREE.BufferGeometry>>(new Set());
   const draftObbChangeRef = useRef<typeof onDraftObbChange>();
+  const didSkipInitialGdtSaveRef = useRef(false);
+  const didSkipInitialVraSaveRef = useRef(false);
 
   // ── 히스토리 (OBB 조작) ──────────────────────────────────────
   const [history, setHistory] = useState<ObbParams[]>([initialObb]);
@@ -2565,6 +2695,70 @@ export default function MeshCropEditor({
   const isDirty = histIdx > 0;
   const busy = loading || extractLoading;
   const hasLocalSceneEdits = isGlb ? glbEditVersion > 0 : sceneUrl !== flyUrl;
+
+  const stopGdtMode = useCallback(() => {
+    setGdtMode(false);
+    setGdtPending(null);
+    setGdtSelected(null);
+    setGdtEditing(null);
+    setAnnotationMoveMode(false);
+  }, []);
+
+  const stopMeasureMode = useCallback(() => {
+    setMeasureMode(false);
+    setMeasurePts([]);
+    setVraMode(false);
+    setAnnotationMoveMode(false);
+  }, []);
+
+  const handleToggleMeasureMode = useCallback(() => {
+    const nextMeasureMode = !measureMode;
+
+    suppressNextMeasureClick.current = false;
+    setMeasureMode(nextMeasureMode);
+    setMeasurePts([]);
+    setVraMode(false);
+    setAnnotationMoveMode(false);
+
+    if (nextMeasureMode) {
+      stopGdtMode();
+    }
+
+    setCutMode(false);
+    setIsCutDragging(false);
+  }, [measureMode, stopGdtMode]);
+
+  const handleToggleGdtMode = useCallback(() => {
+    const nextGdtMode = !gdtMode;
+
+    setGdtMode(nextGdtMode);
+    setGdtPending(null);
+    setGdtSelected(null);
+    setGdtEditing(null);
+    setAnnotationMoveMode(false);
+
+    if (nextGdtMode) {
+      stopMeasureMode();
+    }
+
+    setCutMode(false);
+    setIsCutDragging(false);
+  }, [gdtMode, stopMeasureMode]);
+
+  const handleToggleVraMode = useCallback(() => {
+    const nextVraMode = !vraMode;
+
+    setVraMode(nextVraMode);
+    setMeasureMode(nextVraMode);
+    setMeasurePts([]);
+    setAnnotationMoveMode(false);
+
+    if (nextVraMode) {
+      stopGdtMode();
+      setCutMode(false);
+      setIsCutDragging(false);
+    }
+  }, [stopGdtMode, vraMode]);
 
   useEffect(() => {
     liveObbRef.current = obb;
@@ -2598,6 +2792,48 @@ export default function MeshCropEditor({
     if (!initialCalibrationReferenceLength || !Number.isFinite(initialCalibrationReferenceLength)) return;
     setCalibrationInput(String(Math.round(initialCalibrationReferenceLength * 1000) / 1000));
   }, [initialCalibrationReferenceLength]);
+
+  useEffect(() => {
+    if (!didSkipInitialGdtSaveRef.current) {
+      didSkipInitialGdtSaveRef.current = true;
+      return;
+    }
+    if (!onSaveGdtAnnotations) return;
+
+    const timer = setTimeout(() => {
+      void Promise.resolve(onSaveGdtAnnotations(toAssetGdtAnnotations(gdtAnnotations))).catch(() => {
+        showToast('GD&T 저장에 실패했습니다.', 'err');
+      });
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [gdtAnnotations, onSaveGdtAnnotations, showToast]);
+
+  useEffect(() => {
+    if (!didSkipInitialVraSaveRef.current) {
+      didSkipInitialVraSaveRef.current = true;
+      return;
+    }
+    if (!onSaveVraPoints) return;
+
+    const timer = setTimeout(() => {
+      void Promise.resolve(onSaveVraPoints(vraPoints)).catch(() => {
+        showToast('VRA 치수 입력 저장에 실패했습니다.', 'err');
+      });
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [onSaveVraPoints, showToast, vraPoints]);
+
+  const handleClose = useCallback(() => {
+    if (onSaveGdtAnnotations) {
+      void Promise.resolve(onSaveGdtAnnotations(toAssetGdtAnnotations(gdtAnnotations))).catch(() => undefined);
+    }
+    if (onSaveVraPoints) {
+      void Promise.resolve(onSaveVraPoints(vraPoints)).catch(() => undefined);
+    }
+    onClose();
+  }, [gdtAnnotations, onClose, onSaveGdtAnnotations, onSaveVraPoints, vraPoints]);
 
   const disposeGeneratedMeshGeometries = useCallback(() => {
     generatedMeshGeometriesRef.current.forEach((geometry) => geometry.dispose());
@@ -2737,6 +2973,7 @@ export default function MeshCropEditor({
   // PLY 로드 완료 시 박스 스케일을 클라우드 크기에 맞게 자동 설정
   const handleBoundsReady = useCallback((extX: number, extY: number, extZ: number) => {
     previewBoundsRef.current = [extX, extY, extZ];
+    setAnnotationMarkerRadius(getAnnotationMarkerRadius(extX, extY, extZ));
     setHistory((prev) => {
       const cur = prev[0];
       // 기본 [1,1,1] 스케일일 때만 자동 조정 (저장된 OBB가 있으면 유지)
@@ -3708,7 +3945,7 @@ export default function MeshCropEditor({
     const vra = validPts.reduce((sum, p) => sum + Math.abs(p.measured - parseFloat(p.actual)), 0) / validPts.length;
     setVraSaving(true);
     try {
-      await onSaveVra?.(vra);
+      await onSaveVra?.(vra, vraPoints);
       showToast(`VRA 저장 완료 — ${vra.toFixed(2)} mm (${validPts.length}개 측정)`);
     } catch (error) {
       showToast((error as Error).message ?? 'VRA 저장에 실패했습니다.', 'err');
@@ -3749,22 +3986,17 @@ export default function MeshCropEditor({
       }
 
       if (e.key === 'g' || e.key === 'G') {
-        setGdtMode((prev) => !prev);
-        setMeasureMode(false);
-        setMeasurePts([]);
-        setGdtPending(null);
+        handleToggleGdtMode();
         return;
       }
 
       if (e.key === 'Escape') {
         if (gdtMode) {
-          setGdtMode(false);
-          setGdtPending(null);
+          stopGdtMode();
           return;
         }
-        if (measureMode) {
-          setMeasureMode(false);
-          setMeasurePts([]);
+        if (measureMode || vraMode) {
+          stopMeasureMode();
           return;
         }
 
@@ -3788,11 +4020,16 @@ export default function MeshCropEditor({
     handleExtract,
     handleExtractCancel,
     handleFreeCut,
+    handleToggleGdtMode,
     handleUndo,
     hasLocalSceneEdits,
+    gdtMode,
     isExtracted,
     isGlb,
     measureMode,
+    stopGdtMode,
+    stopMeasureMode,
+    vraMode,
   ]);
 
   const fmt = (arr: number[]) => arr.map((v) => v.toFixed(3)).join(', ');
@@ -3811,6 +4048,8 @@ export default function MeshCropEditor({
     };
   }, []);
 
+  const annotationInputMode = measureMode || gdtMode;
+
   const editorLayout = (
     <div
       className="fixed inset-0 z-[60] m-0 flex h-screen w-screen flex-col overflow-hidden bg-gray-950"
@@ -3823,15 +4062,33 @@ export default function MeshCropEditor({
         {/* 모드 (추출 미리보기 중이 아닐 때만) */}
         {!isExtracted && (
           <div className="flex rounded overflow-hidden border border-gray-600">
-            {(['translate', 'rotate', 'scale'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                className={`px-3 py-1 text-xs transition-colors ${mode === m ? 'bg-orange-500 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
-              >
-                {{ translate: '이동', rotate: '회전', scale: '크기' }[m]}
-              </button>
-            ))}
+            {(['translate', 'rotate', 'scale'] as const).map((m) => {
+              const isAnnotationMoveButton = annotationInputMode && m === 'translate';
+              const active = isAnnotationMoveButton ? annotationMoveMode : !annotationInputMode && mode === m;
+              const disabled = annotationInputMode && m !== 'translate';
+              return (
+                <button
+                  key={m}
+                  onClick={() => {
+                    if (isAnnotationMoveButton) {
+                      setAnnotationMoveMode((prev) => !prev);
+                      return;
+                    }
+                    if (!disabled) setMode(m);
+                  }}
+                  disabled={disabled}
+                  className={`px-3 py-1 text-xs transition-colors ${
+                    active
+                      ? 'bg-orange-500 text-white'
+                      : disabled
+                        ? 'bg-gray-900 text-gray-600 cursor-not-allowed'
+                        : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {{ translate: '이동', rotate: '회전', scale: '크기' }[m]}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -3839,17 +4096,7 @@ export default function MeshCropEditor({
 
         {/* 거리 측정 모드 */}
         <button
-          onClick={() => {
-            setMeasureMode((m: boolean) => {
-              // 켤 때: 혹시 남은 suppress 플래그 초기화
-              // 끌 때: 버튼 클릭 이벤트가 canvas에 전파되지 않으므로 suppress 불필요
-              suppressNextMeasureClick.current = false;
-              return !m;
-            });
-            setMeasurePts([]);
-            setCutMode(false);
-            setIsCutDragging(false);
-          }}
+          onClick={handleToggleMeasureMode}
           className={`flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors ${
             measureMode
               ? 'border-yellow-400 bg-yellow-900/40 text-yellow-300'
@@ -3863,13 +4110,7 @@ export default function MeshCropEditor({
 
         {/* GD&T 기하 공차 모드 */}
         <button
-          onClick={() => {
-            setGdtMode((m) => !m);
-            setMeasureMode(false);
-            setMeasurePts([]);
-            setGdtPending(null);
-            setCutMode(false);
-          }}
+          onClick={handleToggleGdtMode}
           className={`flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors ${
             gdtMode
               ? 'border-purple-400 bg-purple-900/40 text-purple-300'
@@ -3917,20 +4158,7 @@ export default function MeshCropEditor({
         {!isExtracted && (
           <>
             <button
-              onClick={() => {
-                setVraMode((prev) => {
-                  const next = !prev;
-                  if (next) {
-                    setCutMode(false);
-                    setMeasureMode(true);
-                    setMeasurePts([]);
-                  } else {
-                    setMeasureMode(false);
-                    setMeasurePts([]);
-                  }
-                  return next;
-                });
-              }}
+              onClick={handleToggleVraMode}
               disabled={busy}
               title="VRA 치수 입력 모드"
               className={`flex items-center gap-1 px-2 py-1 text-xs rounded border transition-colors ${
@@ -4058,10 +4286,24 @@ export default function MeshCropEditor({
                   <button
                     type="button"
                     onClick={() => {
-                      void navigator.clipboard.writeText(window.location.href).then(() => {
+                      const url = window.location.href;
+                      if (navigator.clipboard?.writeText) {
+                        void navigator.clipboard.writeText(url).then(() => {
+                          setShowShare(false);
+                          showToast('링크가 클립보드에 복사되었습니다.');
+                        });
+                      } else {
+                        const ta = document.createElement('textarea');
+                        ta.value = url;
+                        ta.style.position = 'fixed';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
                         setShowShare(false);
                         showToast('링크가 클립보드에 복사되었습니다.');
-                      });
+                      }
                     }}
                     className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 active:bg-blue-800 flex items-center justify-center gap-2"
                   >
@@ -4234,7 +4476,7 @@ export default function MeshCropEditor({
         <div className="w-px h-5 bg-gray-700 mx-1" />
 
         <button
-          onClick={onClose}
+          onClick={handleClose}
           disabled={busy}
           className="px-3 py-1 text-xs bg-gray-700 text-gray-300 rounded hover:bg-gray-600 disabled:opacity-40"
         >
@@ -4302,6 +4544,8 @@ export default function MeshCropEditor({
             cutSelection={cutSelectionPreview}
             glbResetKey={glbResetKey}
             forceShowSplat={viewAsGaussian}
+            annotationMarkerRadius={annotationMarkerRadius}
+            annotationMoveMode={annotationMoveMode}
             gdtMode={gdtMode}
             gdtVisible={gdtVisible}
             gdtAnnotations={gdtAnnotations}
@@ -4320,6 +4564,9 @@ export default function MeshCropEditor({
               setGdtAnnotations((prev) => prev.filter((a) => a.id !== id));
               setGdtSelected(null);
             }}
+            vraMode={vraMode}
+            vraPoints={vraPoints}
+            vraLineWidth={vraLineWidth}
           />
         </Canvas>
 
@@ -4405,7 +4652,13 @@ export default function MeshCropEditor({
         </div>
 
         <div className="absolute top-3 left-3 bg-black/70 border border-white/10 text-gray-200 text-xs px-2.5 py-2 rounded pointer-events-none leading-relaxed">
-          {gdtMode ? (
+          {annotationMoveMode ? (
+            <>
+              <span className="text-orange-300 font-medium">화면 이동</span> | 왼쪽 드래그로 화면을 이동합니다.
+              <br />
+              <span className="text-gray-400">이동 버튼을 다시 누르면 표면 클릭 입력으로 돌아갑니다.</span>
+            </>
+          ) : gdtMode ? (
             <>
               <span className="text-purple-300 font-medium">GD&T 모드</span> | 표면을 클릭해 공차 기호를 추가합니다.
               <br />
@@ -4486,7 +4739,22 @@ export default function MeshCropEditor({
 
         {vraMode && (
           <div className="absolute top-3 right-3 bg-black/90 border border-blue-500/50 text-gray-100 text-xs px-3 py-3 rounded-lg shadow-lg w-80 max-h-[85vh] overflow-y-auto">
-            <div className="text-blue-300 font-semibold mb-2 text-sm">VRA 치수 입력</div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-blue-300 font-semibold text-sm">VRA 치수 입력</div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-gray-400 text-[11px]">선 굵기</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={vraLineWidth}
+                  onChange={(e) => setVraLineWidth(Number(e.target.value))}
+                  className="w-20 accent-blue-400"
+                />
+                <span className="text-gray-300 text-[11px] w-4 text-right">{vraLineWidth}</span>
+              </div>
+            </div>
 
             {/* 캘리브레이션 */}
             <div className="mb-3">
@@ -4542,7 +4810,17 @@ export default function MeshCropEditor({
                     return;
                   }
                   const measuredMm = measureDistance * 1000;
-                  setVraPoints((prev) => [...prev, { measured: measuredMm, actual: '' }]);
+                  const p1 = measurePts[0];
+                  const p2 = measurePts[1];
+                  setVraPoints((prev) => [
+                    ...prev,
+                    {
+                      measured: measuredMm,
+                      actual: '',
+                      p1: [p1.x, p1.y, p1.z],
+                      p2: [p2.x, p2.y, p2.z],
+                    },
+                  ]);
                   setMeasurePts([]);
                 }}
                 disabled={measureDistance === null || vraPoints.length >= 10}

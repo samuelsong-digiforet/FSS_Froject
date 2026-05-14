@@ -1,11 +1,14 @@
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import * as Minio from 'minio';
 
 @Injectable()
 export class StorageService implements OnModuleInit {
   private readonly client: Minio.Client;
   private readonly bucket: string;
+  private readonly extS3: S3Client;
+  private readonly extBucket: string;
   private readonly logger = new Logger(StorageService.name);
 
   constructor(private readonly config: ConfigService) {
@@ -16,6 +19,17 @@ export class StorageService implements OnModuleInit {
       useSSL: false,
       accessKey: this.config.get<string>('MINIO_ROOT_USER') ?? 'fss_admin',
       secretKey: this.config.get<string>('MINIO_ROOT_PASSWORD') ?? 'fss_minio_secret_2024',
+    });
+
+    this.extBucket = this.config.get<string>('EXT_S3_BUCKET') ?? 'dt-storage';
+    this.extS3 = new S3Client({
+      region: this.config.get<string>('EXT_S3_REGION') ?? 'us-east-1',
+      endpoint: this.config.get<string>('EXT_S3_ENDPOINT'),
+      credentials: {
+        accessKeyId: this.config.get<string>('EXT_S3_ACCESS_KEY') ?? '',
+        secretAccessKey: this.config.get<string>('EXT_S3_SECRET_KEY') ?? '',
+      },
+      forcePathStyle: true,
     });
   }
 
@@ -71,5 +85,21 @@ export class StorageService implements OnModuleInit {
   // 파일 삭제
   async delete(objectName: string): Promise<void> {
     await this.client.removeObject(this.bucket, objectName);
+  }
+
+  async copyToExternal(sourceObjectName: string, targetObjectName = sourceObjectName): Promise<void> {
+    if (!this.config.get<string>('EXT_S3_ENDPOINT')) {
+      throw new Error('EXT_S3_ENDPOINT is not configured');
+    }
+
+    const stat = await this.client.statObject(this.bucket, sourceObjectName);
+    const stream = await this.client.getObject(this.bucket, sourceObjectName);
+    await this.extS3.send(new PutObjectCommand({
+      Bucket: this.extBucket,
+      Key: targetObjectName,
+      Body: stream,
+      ContentLength: stat.size,
+      ACL: 'public-read',
+    }));
   }
 }

@@ -4,7 +4,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like } from 'typeorm';
+import { Repository } from 'typeorm';
 import { AssetCategory } from './entities/asset-category.entity';
 import { CreateAssetCategoryDto } from './dto/create-asset-category.dto';
 import { UpdateAssetCategoryDto } from './dto/update-asset-category.dto';
@@ -23,8 +23,8 @@ export class AssetCategoriesService {
     page?: number;
     limit?: number;
   }): Promise<{ total: number; items: AssetCategory[] }> {
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const page = normalizePositiveInt(query.page, 1);
+    const limit = Math.min(normalizePositiveInt(query.limit, 20), 100);
 
     const qb = this.categoryRepo.createQueryBuilder('cat')
       .leftJoinAndSelect('cat.createdBy', 'createdBy')
@@ -81,4 +81,9 @@ export class AssetCategoriesService {
     cat.isActive = false;
     await this.categoryRepo.save(cat);
   }
+}
+
+function normalizePositiveInt(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.floor(value as number));
 }

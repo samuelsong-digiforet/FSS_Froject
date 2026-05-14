@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, ILike, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Log } from './log.entity';
 
 export interface RecordLogDto {
@@ -33,7 +33,9 @@ export class LogsService {
   }
 
   async findAll(dto: FindAllLogsDto = {}) {
-    const { search, startDate, endDate, page = 1, limit = 20 } = dto;
+    const { search, startDate, endDate } = dto;
+    const page = normalizePositiveInt(dto.page, 1);
+    const limit = Math.min(normalizePositiveInt(dto.limit, 20), 100);
 
     const qb = this.logRepo.createQueryBuilder('log');
 
@@ -62,4 +64,9 @@ export class LogsService {
 
     return { data, total, page, limit };
   }
+}
+
+function normalizePositiveInt(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.floor(value as number));
 }

@@ -54,6 +54,18 @@ QUALITY_PRESETS = {
     },
 }
 DEFAULT_QUALITY_PRESET = "fast"
+MESH_TEXTURE_SLOTS = (
+    "image",
+    "baseColorTexture",
+    "metallicRoughnessTexture",
+    "normalTexture",
+    "occlusionTexture",
+    "emissiveTexture",
+)
+
+
+class RequiredMeshTextureError(RuntimeError):
+    pass
 
 
 def _normalize_quality_preset(quality_preset: str | None) -> str:
@@ -783,6 +795,147 @@ def _as_4x4_transform(raw):
     return None
 
 
+def _read_colmap_points3d_xyz(points_bin_path: str):
+    import struct
+
+    points = []
+    with open(points_bin_path, "rb") as f:
+        num_points = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(num_points):
+            f.read(8)  # point3D_id
+            xyz = struct.unpack("<ddd", f.read(24))
+            f.read(3)  # rgb
+            f.read(8)  # error
+            track_len = struct.unpack("<Q", f.read(8))[0]
+            f.read(track_len * 8)
+            points.append(xyz)
+
+    return np.asarray(points, dtype=np.float64)
+
+
+def _read_ply_vertices(ply_path: str):
+    try:
+        import trimesh
+
+        loaded = trimesh.load(ply_path, process=False)
+        vertices = getattr(loaded, "vertices", None)
+        if vertices is None and isinstance(loaded, trimesh.Scene):
+            dumped = loaded.dump(concatenate=True)
+            vertices = getattr(dumped, "vertices", None)
+        if vertices is None:
+            return None
+        points = np.asarray(vertices, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
+            return None
+        return points
+    except Exception:
+        return None
+
+
+def _load_preview_space_points(processed_dir: str | None):
+    if not processed_dir:
+        return None, None
+
+    ply_candidates = [
+        os.path.join(processed_dir, "colmap", "sparse", "0", "points3D.ply"),
+        os.path.join(processed_dir, "sparse", "0", "points3D.ply"),
+        os.path.join(processed_dir, "colmap", "sparse", "points3D.ply"),
+    ]
+    for candidate in ply_candidates:
+        if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+            points = _read_ply_vertices(candidate)
+            if points is not None:
+                return points, candidate
+
+    bin_candidates = [
+        os.path.join(processed_dir, "colmap", "sparse", "0", "points3D.bin"),
+        os.path.join(processed_dir, "sparse", "0", "points3D.bin"),
+    ]
+    for candidate in bin_candidates:
+        if os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+            try:
+                return _read_colmap_points3d_xyz(candidate), candidate
+            except Exception:
+                continue
+
+    return None, None
+
+
+def _count_points_inside_obb(points: np.ndarray, center: np.ndarray, rotation_deg: np.ndarray, scale: np.ndarray):
+    if points is None or len(points) == 0:
+        return 0, 0.0
+
+    rotation_matrix = _rotation_matrix_xyz_deg(rotation_deg)
+    half = np.maximum(np.abs(scale) / 2.0, np.full(3, 1e-6, dtype=np.float64))
+    local = (points - center) @ rotation_matrix
+    inside = np.all(np.abs(local) <= half, axis=1)
+    kept = int(np.count_nonzero(inside))
+    return kept, float(kept / max(len(points), 1))
+
+
+def _estimate_preview_obb_coverage(obb_params: dict | None, processed_dir: str | None):
+    if not obb_params:
+        return None
+
+    try:
+        center = np.array(obb_params.get("center", [0, 0, 0]), dtype=np.float64)
+        rotation_deg = np.array(obb_params.get("rotation", [0, 0, 0]), dtype=np.float64)
+        scale = np.abs(np.array(obb_params.get("scale", [1, 1, 1]), dtype=np.float64))
+        preview_center = np.array(obb_params.get("previewCenter", [0, 0, 0]), dtype=np.float64)
+        if center.shape != (3,) or rotation_deg.shape != (3,) or scale.shape != (3,) or preview_center.shape != (3,):
+            return None
+        if not (
+            np.all(np.isfinite(center))
+            and np.all(np.isfinite(rotation_deg))
+            and np.all(np.isfinite(scale))
+            and np.all(np.isfinite(preview_center))
+        ):
+            return None
+
+        points, source = _load_preview_space_points(processed_dir)
+        if points is None or len(points) == 0:
+            return None
+
+        world_center = center + preview_center
+        inside, ratio = _count_points_inside_obb(points, world_center, rotation_deg, scale)
+        stats = {
+            "inside": inside,
+            "total": int(len(points)),
+            "ratio": ratio,
+            "source": source,
+        }
+        print(
+            "[Converter][OBB] preview selection coverage:"
+            f" source={source},"
+            f" inside={inside}/{len(points)} ({ratio * 100:.2f}%),"
+            f" previewWorldCenter={world_center.tolist()},"
+            f" previewScale={scale.tolist()}"
+        )
+        return stats
+    except Exception as e:
+        print(f"[Converter][OBB] preview coverage estimate failed: {e}")
+        return None
+
+
+def _should_use_poisson_export_obb(coverage_stats: dict | None):
+    if not coverage_stats:
+        return False
+    total = max(int(coverage_stats.get("total", 0)), 1)
+    inside = int(coverage_stats.get("inside", 0))
+    min_inside = max(64, min(500, int(total * 0.002)))
+    return inside >= min_inside
+
+
+def _poisson_crop_num_points(base_points: int, coverage_stats: dict | None):
+    if not coverage_stats:
+        return base_points
+    ratio = float(coverage_stats.get("ratio", 1.0))
+    if ratio >= 0.25:
+        return base_points
+    scaled = int(base_points * max(0.20, min(1.0, ratio * 3.0)))
+    return max(60000, min(base_points, scaled))
+
+
 def _obb_aabb_bounds(center: np.ndarray, rotation_deg: np.ndarray, scale: np.ndarray):
     rotation_matrix = _rotation_matrix_xyz_deg(rotation_deg)
     half = np.maximum(np.abs(scale) / 2.0, np.full(3, 1e-6, dtype=np.float64))
@@ -1019,7 +1172,8 @@ def _crop_exported_mesh_v2(
 
         export_obb = resolved_obb or _resolve_export_obb(obb_params, processed_dir)
         if export_obb is None:
-            raise ValueError("invalid OBB crop params")
+            print("[Converter][Crop] invalid OBB crop params, keeping original mesh")
+            return
 
         exact_center = np.array(export_obb["center"], dtype=np.float64)
         exact_rotation = np.array(export_obb["rotation_deg"], dtype=np.float64)
@@ -1035,15 +1189,23 @@ def _crop_exported_mesh_v2(
             f" kept={kept}/{total}"
         )
         if clipped is None or clipped.is_empty or len(clipped.faces) == 0:
-            raise ValueError("OBB crop produced an empty mesh")
+            print("[Converter][Crop] OBB crop produced an empty mesh, keeping original mesh")
+            return
+        min_expected_faces = max(50, int(total * 0.01))
+        if total >= 1000 and kept < min_expected_faces:
+            print(
+                "[Converter][Crop] OBB crop kept too few faces,"
+                f" keeping original mesh instead (kept={kept}/{total}, minExpected={min_expected_faces})"
+            )
+            return
 
         clipped.export(mesh_path)
         print(f"[Converter][Crop] mesh clip complete: {mesh_path} (kept={kept}/{total})")
         return
 
     except Exception as e:
-        print(f"[Converter][Crop] crop failed: {e}")
-        raise
+        print(f"[Converter][Crop] crop failed, keeping original mesh: {e}")
+        return
 
 
 
@@ -1403,10 +1565,10 @@ _SSIM_PATTERN = re.compile(r'ssim[:\s=]+([0-9]+\.?[0-9]*)', re.IGNORECASE)
 def _load_nerfstudio_transform(processed_dir: str):
     """Return raw preview/COLMAP -> Nerfstudio dataparser-space transform.
 
-    ns-export OBB arguments and TSDF mesh vertices live in the dataparser output
-    space, not just the axis-swapped COLMAP space saved in transforms.json.
-    Recreate Nerfstudio's default auto-orient, centering, and auto-scale step so
-    crop boxes selected in the sparse COLMAP preview land on the exported mesh.
+    ns-export OBB arguments and exported mesh vertices live in the dataparser
+    output space, not just the sparse COLMAP preview space. Recreate
+    Nerfstudio's default auto-orient, centering, and auto-scale step so crop
+    boxes selected in the sparse preview land on the exported mesh.
     """
     import json as _json
 
@@ -1669,45 +1831,177 @@ def _coerce_scene_and_mesh(scene_or_mesh):
     raise ValueError(f"unsupported mesh payload: {type(scene_or_mesh)}")
 
 
-def _write_mesh_interop_bundle(scene_or_mesh, output_dir: str, report=None, texture_dir: str | None = None) -> str:
+def _texture_slot_has_image(value) -> bool:
+    if value is None:
+        return False
+    if hasattr(value, "image"):
+        return _texture_slot_has_image(getattr(value, "image", None))
+    return hasattr(value, "save") or isinstance(value, np.ndarray)
+
+
+def _scene_has_image_texture(scene_or_mesh) -> bool:
+    try:
+        import trimesh
+
+        if isinstance(scene_or_mesh, trimesh.Scene):
+            geometries = scene_or_mesh.geometry.values()
+        elif isinstance(scene_or_mesh, trimesh.Trimesh):
+            geometries = [scene_or_mesh]
+        else:
+            return False
+
+        for geom in geometries:
+            visual = getattr(geom, "visual", None)
+            mat = getattr(visual, "material", None)
+            if mat is None:
+                continue
+            for slot in MESH_TEXTURE_SLOTS:
+                if _texture_slot_has_image(getattr(mat, slot, None)):
+                    return True
+        return False
+    except Exception as e:
+        print(f"[MeshTexture] texture inspection failed: {e}")
+        return False
+
+
+def _export_scene_to_glb(scene, mesh, glb_path: str, require_texture: bool = False):
+    had_texture = _scene_has_image_texture(scene)
+    if require_texture and not had_texture:
+        raise RequiredMeshTextureError("Required mesh texture was not found before GLB export")
+
+    try:
+        scene.export(glb_path)
+        if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
+            raise ValueError("scene GLB export produced empty file")
+    except Exception as e:
+        if require_texture or had_texture:
+            raise RequiredMeshTextureError(f"Textured GLB export failed: {e}") from e
+        print(f"[MeshBundle] scene GLB export failed ({e}), falling back to mesh export")
+        mesh.export(glb_path)
+
+    if require_texture or had_texture:
+        import trimesh
+
+        exported = trimesh.load(glb_path, force="scene")
+        if not _scene_has_image_texture(exported):
+            raise RequiredMeshTextureError("GLB export completed without an embedded image texture")
+
+
+def _extract_textures_from_scene(scene, output_dir: str) -> list:
+    """Scene에 임베드된 텍스처 이미지를 PNG 파일로 추출하여 경로 목록 반환"""
+    try:
+        extracted = []
+        img_idx = [0]
+        seen_img_ids = set()
+
+        def _save_img(img, suffix=""):
+            if img is None:
+                return
+            if id(img) in seen_img_ids:
+                return
+            seen_img_ids.add(id(img))
+            img_path = os.path.join(output_dir, f"texture_{img_idx[0]}{suffix}.png")
+            try:
+                img.save(img_path)
+                extracted.append(img_path)
+                img_idx[0] += 1
+            except Exception as e_img:
+                print(f"[MeshBundle] 텍스처 저장 실패: {e_img}")
+
+        for _name, geom in scene.geometry.items():
+            visual = getattr(geom, 'visual', None)
+            if visual is None:
+                continue
+            mat = getattr(visual, 'material', None)
+            if mat is None:
+                continue
+            # SimpleMaterial: single image
+            _save_img(getattr(mat, 'image', None))
+            # PBRMaterial: multiple texture slots
+            for slot in ('baseColorTexture', 'metallicRoughnessTexture', 'normalTexture',
+                         'occlusionTexture', 'emissiveTexture'):
+                tex = getattr(mat, slot, None)
+                if tex is not None:
+                    _save_img(getattr(tex, 'image', None) if hasattr(tex, 'image') else tex,
+                              suffix=f"_{slot}")
+        return extracted
+    except Exception as e:
+        print(f"[MeshBundle] scene 텍스처 추출 실패 (무시): {e}")
+        return []
+
+
+def _write_mesh_interop_bundle(
+    scene_or_mesh,
+    output_dir: str,
+    report=None,
+    texture_dir: str | None = None,
+    require_texture: bool = False,
+) -> str:
     scene, mesh = _coerce_scene_and_mesh(scene_or_mesh)
     glb_path = os.path.join(output_dir, "output.glb")
     obj_path = os.path.join(output_dir, "output.obj")
     stl_path = os.path.join(output_dir, "output.stl")
     ply_path = os.path.join(output_dir, "output.ply")
 
-    # GLB: scene으로 내보내 텍스처/재질을 보존하고 실패하면 mesh fallback 사용
-    try:
-        scene.export(glb_path)
-        if not os.path.exists(glb_path) or os.path.getsize(glb_path) == 0:
-            raise ValueError("scene GLB export produced empty file")
-    except Exception as e:
-        print(f"[MeshBundle] scene GLB export failed ({e}), falling back to mesh export")
-        mesh.export(glb_path)
+    MAIN_FILES = {"output.glb", "output.obj", "output.stl", "output.ply", "output.zip"}
+    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
+    MTL_EXTS   = {'.mtl'}
 
-    mesh.export(obj_path)
+    # GLB: scene으로 내보내 텍스처/재질을 보존하고 실패하면 mesh fallback 사용
+    _export_scene_to_glb(scene, mesh, glb_path, require_texture=require_texture)
+
+    # OBJ: scene으로 내보내 재질/MTL/텍스처 파일도 함께 생성
+    try:
+        scene.export(obj_path)
+    except Exception as e:
+        print(f"[MeshBundle] scene OBJ export failed ({e}), falling back to mesh export")
+        mesh.export(obj_path)
+
     mesh.export(stl_path)
     mesh.export(ply_path, vertex_normal=True)
 
     if report:
         report(92)
 
-    # texture_dir에서 이미지 파일 수집 (하위 디렉터리 포함)
-    IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
-    texture_files = []
+    # OBJ 내보내기 시 output_dir에 생성된 MTL/텍스처 파일 수집
+    obj_extras: list[tuple[str, str]] = []  # (abs_path, arcname)
+    for fname in sorted(os.listdir(output_dir)):
+        if fname in MAIN_FILES:
+            continue
+        ext = os.path.splitext(fname)[-1].lower()
+        if ext in IMAGE_EXTS or ext in MTL_EXTS:
+            fpath = os.path.join(output_dir, fname)
+            if os.path.isfile(fpath):
+                obj_extras.append((fpath, fname))
+    if obj_extras:
+        print(f"[MeshBundle] OBJ 내보내기 생성 파일 {len(obj_extras)}개 ZIP에 포함")
+
+    # texture_dir에서 이미지 파일 수집 (하위 디렉터리 포함, nerfstudio 내보내기용)
+    texture_files: list[str] = []
     if texture_dir and os.path.isdir(texture_dir):
-        all_files = []
         for dirpath, _, filenames in os.walk(texture_dir):
+            # output_dir 내부는 이미 obj_extras로 처리했으므로 중복 방지
+            if os.path.abspath(dirpath) == os.path.abspath(output_dir):
+                continue
             for fname in filenames:
                 if os.path.splitext(fname)[-1].lower() in IMAGE_EXTS:
-                    all_files.append(os.path.join(dirpath, fname))
-        texture_files = sorted(all_files)
+                    texture_files.append(os.path.join(dirpath, fname))
+        texture_files.sort()
         if texture_files:
-            print(f"[MeshBundle] 텍스처 {len(texture_files)}개 ZIP에 포함")
+            print(f"[MeshBundle] 외부 텍스처 {len(texture_files)}개 ZIP에 포함")
         else:
             print(f"[MeshBundle] texture_dir({texture_dir})에 이미지 파일 없음")
 
+    # 위 두 경로 모두 텍스처 없는 경우: scene에서 직접 추출 (GLB 임베드 텍스처)
+    if not obj_extras and not texture_files:
+        extracted = _extract_textures_from_scene(scene, output_dir)
+        if extracted:
+            for ep in extracted:
+                obj_extras.append((ep, os.path.basename(ep)))
+            print(f"[MeshBundle] scene에서 텍스처 {len(extracted)}개 추출")
+
     zip_path = os.path.join(output_dir, "output.zip")
+    added_arcnames: set[str] = set()
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for fname, arcname in [
             (glb_path, "output.glb"),
@@ -1717,10 +2011,26 @@ def _write_mesh_interop_bundle(scene_or_mesh, output_dir: str, report=None, text
         ]:
             if os.path.exists(fname):
                 zf.write(fname, arcname)
+                added_arcnames.add(arcname)
             else:
                 print(f"[MeshBundle] WARNING: {arcname} not found, skipping")
+
+        # MTL + OBJ 내보내기 텍스처 (원본 파일명 유지해 OBJ 참조가 깨지지 않도록)
+        for fpath, arcname in obj_extras:
+            if arcname not in added_arcnames:
+                zf.write(fpath, arcname)
+                added_arcnames.add(arcname)
+
+        # 외부 텍스처 (basename 충돌 시 접두어 추가)
         for tex_path in texture_files:
-            zf.write(tex_path, os.path.basename(tex_path))
+            arcname = os.path.basename(tex_path)
+            if arcname in added_arcnames:
+                arcname = f"tex_{arcname}"
+            if arcname not in added_arcnames:
+                zf.write(tex_path, arcname)
+                added_arcnames.add(arcname)
+
+    print(f"[MeshBundle] ZIP 생성 완료: {len(added_arcnames)}개 파일")
     return zip_path
 
 
@@ -1734,9 +2044,11 @@ def _mesh_from_colmap(processed_dir: str, output_dir: str, report, output_profil
     nerf_iterations = cfg["nerf_iterations"]
     mesh_sample_points = cfg["mesh_sample_points"]
     mesh_target_faces = cfg["mesh_target_faces"]
-    mesh_psr_depth = cfg["mesh_psr_depth"]
 
-    print(f"[Converter][Mesh from COLMAP] nerfacto -> tsdf mesh export (quality={quality_preset}, iter={nerf_iterations}, faces={mesh_target_faces})")
+    print(
+        "[Converter][Mesh from COLMAP] nerfacto -> poisson mesh export "
+        f"(quality={quality_preset}, iter={nerf_iterations}, points={mesh_sample_points}, faces={mesh_target_faces})"
+    )
     _run_cmd(
         [
             "ns-train", "nerfacto",
@@ -1754,44 +2066,55 @@ def _mesh_from_colmap(processed_dir: str, output_dir: str, report, output_profil
     config_path = _find_nerfstudio_config(train_dir)
 
     export_obb = _resolve_export_obb(obb_params, processed_dir) if obb_params else None
+    preview_obb_coverage = _estimate_preview_obb_coverage(obb_params, processed_dir) if export_obb is not None else None
+    use_export_obb = export_obb is not None and _should_use_poisson_export_obb(preview_obb_coverage)
+    export_num_points = _poisson_crop_num_points(mesh_sample_points, preview_obb_coverage) if use_export_obb else mesh_sample_points
 
     export_cmd = [
-        "ns-export", "tsdf",
+        "ns-export", "poisson",
         "--load-config", config_path,
         "--output-dir", export_dir,
+        "--num-points", str(export_num_points),
         "--target-num-faces", str(mesh_target_faces),
+        "--normal-method", "model_output",
         "--texture-method", "nerf",
-        "--resolution", "256",
+        "--unwrap-method", "xatlas",
+        "--num-pixels-per-side", "2048",
+        "--num-rays-per-batch", "16384",
     ]
-    if export_obb is not None:
-        bbox_min, bbox_max = _obb_aabb_bounds(
-            np.array(export_obb["center"], dtype=np.float64),
-            np.array(export_obb["rotation_deg"], dtype=np.float64),
-            np.array(export_obb["scale"], dtype=np.float64),
-        )
+    if use_export_obb:
         export_cmd.extend([
-            "--bounding-box-min",
-            *[str(v) for v in bbox_min.tolist()],
-            "--bounding-box-max",
-            *[str(v) for v in bbox_max.tolist()],
+            "--obb-center",
+            *[str(float(v)) for v in np.asarray(export_obb["center"], dtype=np.float64).tolist()],
+            "--obb-rotation",
+            *[str(float(v)) for v in np.asarray(export_obb["rotation_rad"], dtype=np.float64).tolist()],
+            "--obb-scale",
+            *[str(float(v)) for v in np.asarray(export_obb["scale"], dtype=np.float64).tolist()],
         ])
         print(
-            "[Converter][Mesh from COLMAP] TSDF OBB AABB export bounds:"
-            f" min={bbox_min.tolist()},"
-            f" max={bbox_max.tolist()},"
+            "[Converter][Mesh from COLMAP] Poisson export-time OBB crop enabled:"
             f" obbCenter={export_obb['center'].tolist()},"
             f" obbRotationDeg={export_obb['rotation_deg'].tolist()},"
-            f" obbScale={export_obb['scale'].tolist()}"
+            f" obbRotationRad={export_obb['rotation_rad'].tolist()},"
+            f" obbScale={export_obb['scale'].tolist()},"
+            f" points={export_num_points}"
+        )
+    elif export_obb is not None:
+        print(
+            "[Converter][Mesh from COLMAP] Poisson export-time OBB crop skipped; "
+            "falling back to post-export crop to avoid slow/empty point sampling."
         )
 
     _run_cmd(
         export_cmd,
         report_range=(80, 92), report_fn=report,
-        timeout=1800, stop_check=stop_check,
+        timeout=3600, stop_check=stop_check,
     )
 
-    if obb_params:
+    if obb_params and not use_export_obb:
         _crop_exported_mesh_v2(export_dir, obb_params, processed_dir, resolved_obb=export_obb)
+    elif obb_params:
+        print("[Converter][Crop] export-time OBB used; keeping NerfStudio textured mesh output")
     report(95)
 
     obj_files = glob_module.glob(os.path.join(export_dir, "*.obj"))
@@ -1800,61 +2123,51 @@ def _mesh_from_colmap(processed_dir: str, output_dir: str, report, output_profil
             import trimesh
 
             scene_or_mesh = trimesh.load(obj_files[0], force="scene")
+            if not _scene_has_image_texture(scene_or_mesh):
+                raise RequiredMeshTextureError("NerfStudio mesh export did not include an image texture")
             if profile == "mesh_interop_bundle":
-                zip_path = _write_mesh_interop_bundle(scene_or_mesh, output_dir, report=report, texture_dir=export_dir)
+                zip_path = _write_mesh_interop_bundle(
+                    scene_or_mesh,
+                    output_dir,
+                    report=report,
+                    texture_dir=export_dir,
+                    require_texture=True,
+                )
                 report(99)
                 return zip_path
             output_path = os.path.join(output_dir, "output.glb")
-            scene, _ = _coerce_scene_and_mesh(scene_or_mesh)
-            scene.export(output_path)
+            scene, mesh = _coerce_scene_and_mesh(scene_or_mesh)
+            _export_scene_to_glb(scene, mesh, output_path, require_texture=True)
             report(99)
             return output_path
+        except RequiredMeshTextureError:
+            raise
         except Exception as e:
-            print(f"[Converter][Mesh from COLMAP] OBJ -> GLB export failed: {e}")
+            raise RuntimeError(f"Textured OBJ -> GLB export failed: {e}") from e
 
-    mesh_ply = next(
-        (
-            path for path in [
-                os.path.join(export_dir, "mesh.ply"),
-                os.path.join(export_dir, "tsdf_mesh.ply"),
-                os.path.join(export_dir, "poisson_mesh.ply"),
-            ]
-            if os.path.exists(path)
-        ),
-        None,
-    )
     output_path = os.path.join(output_dir, "output.glb")
-    if mesh_ply is not None:
-        try:
-            import trimesh
+    glbs = glob_module.glob(os.path.join(export_dir, "*.glb"))
+    if glbs:
+        import trimesh
 
-            scene_or_mesh = trimesh.load(mesh_ply, force="scene")
-            if profile == "mesh_interop_bundle":
-                zip_path = _write_mesh_interop_bundle(scene_or_mesh, output_dir, report=report, texture_dir=export_dir)
-                report(99)
-                return zip_path
-            scene, _ = _coerce_scene_and_mesh(scene_or_mesh)
-            scene.export(output_path)
-        except Exception as e:
-            print(f"[Converter][Mesh from COLMAP] mesh export failed: {e}")
-            output_path = os.path.join(output_dir, "output.ply")
-            shutil.copy(mesh_ply, output_path)
-    else:
-        glbs = glob_module.glob(os.path.join(export_dir, "*.glb"))
-        if glbs:
-            if profile == "mesh_interop_bundle":
-                import trimesh
+        scene_or_mesh = trimesh.load(glbs[0], force="scene")
+        if not _scene_has_image_texture(scene_or_mesh):
+            raise RequiredMeshTextureError("NerfStudio GLB export did not include an image texture")
+        if profile == "mesh_interop_bundle":
+            zip_path = _write_mesh_interop_bundle(
+                scene_or_mesh,
+                output_dir,
+                report=report,
+                texture_dir=export_dir,
+                require_texture=True,
+            )
+            report(99)
+            return zip_path
+        shutil.copy(glbs[0], output_path)
+        report(99)
+        return output_path
 
-                scene_or_mesh = trimesh.load(glbs[0], force="scene")
-                zip_path = _write_mesh_interop_bundle(scene_or_mesh, output_dir, report=report, texture_dir=export_dir)
-                report(99)
-                return zip_path
-            shutil.copy(glbs[0], output_path)
-        else:
-            raise FileNotFoundError("Mesh from COLMAP: no export result found")
-
-    report(99)
-    return output_path
+    raise RequiredMeshTextureError("NerfStudio mesh export did not produce the required textured OBJ/GLB")
 
 
 CAD_EXTS = {".step", ".stp", ".iges", ".igs", ".brep"}
@@ -1875,6 +2188,14 @@ def _convert_mesh(input_path: str, output_dir: str, ext: str, report, output_pro
             zip_path = _write_mesh_interop_bundle(scene_or_mesh, output_dir, report=report)
             report(95)
             return zip_path
+        if ext == ".gltf":
+            import trimesh
+
+            scene_or_mesh = trimesh.load(input_path, force="scene")
+            scene, mesh = _coerce_scene_and_mesh(scene_or_mesh)
+            _export_scene_to_glb(scene, mesh, output_path)
+            report(95)
+            return output_path
         shutil.copy(input_path, output_path)
         report(95)
         return output_path
@@ -1942,8 +2263,8 @@ def _convert_mesh(input_path: str, output_dir: str, ext: str, report, output_pro
             report(95)
             return zip_path
 
-        scene, _ = _coerce_scene_and_mesh(scene_or_mesh)
-        scene.export(output_path)
+        scene, mesh = _coerce_scene_and_mesh(scene_or_mesh)
+        _export_scene_to_glb(scene, mesh, output_path)
         report(95)
         return output_path
     except ImportError:

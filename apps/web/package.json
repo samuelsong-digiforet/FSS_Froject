@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext ts,tsx"
+    "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@mkkellogg/gaussian-splats-3d": "^0.4.7",
