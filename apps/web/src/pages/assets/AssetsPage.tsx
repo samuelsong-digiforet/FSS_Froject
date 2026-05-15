@@ -517,6 +517,44 @@ function FilterDropdown<T extends string>({
   );
 }
 
+function RadioFilter<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl px-5 py-3 flex items-center gap-4">
+      <span className="text-sm font-semibold text-gray-600 whitespace-nowrap w-[4.5rem] shrink-0 tracking-[0.18em]">
+        {label}
+      </span>
+      <span className="text-gray-300 text-sm">|</span>
+      <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+        {options.map((opt) => (
+          <label key={opt.value} className="flex items-center gap-1.5 cursor-pointer">
+            <input
+              type="radio"
+              name={label}
+              value={opt.value}
+              checked={value === opt.value}
+              onChange={() => onChange(opt.value)}
+              className="accent-[#2d4a7a] w-3.5 h-3.5"
+            />
+            <span className={`text-sm ${value === opt.value ? 'text-[#2d4a7a] font-medium' : 'text-gray-600'}`}>
+              {opt.label}
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: AssetStatus }) {
   return (
     <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${ASSET_STATUS_COLORS[status]}`}>
@@ -567,6 +605,7 @@ export default function AssetsPage() {
   const [directDetecting, setDirectDetecting] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [uploading, setUploading] = useState(false);
+  const uploadAbortController = useRef<AbortController | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [obbCenter, setObbCenter] = useState<[string, string, string]>(['0', '0', '0']);
   const [obbRotation, setObbRotation] = useState<[string, string, string]>(['0', '0', '0']);
@@ -876,10 +915,12 @@ export default function AssetsPage() {
     if (!effectiveType) {
       return setFormError('일반 업로드 파일 타입을 자동 판별하지 못했습니다. GLB, PLY, ZIP 파일인지 확인해주세요.');
     }
+    const abortController = new AbortController();
+    uploadAbortController.current = abortController;
     setUploading(true);
     setFormError('');
     try {
-      const { data: uploaded } = await assetsApi.upload(file, setUploadPct);
+      const { data: uploaded } = await assetsApi.upload(file, setUploadPct, abortController.signal);
       const isConvert = form.uploadMode === 'convert';
       const baseName = form.name.trim();
       const assetName = isConvert ? `${baseName} ${ASSET_TYPE_SUFFIX[effectiveType]}`.trim() : baseName;
@@ -897,9 +938,14 @@ export default function AssetsPage() {
       await fetchAssets();
       setAlert(form.uploadMode === 'direct' ? '에셋 업로드를 완료했습니다.' : '에셋 업로드 후 변환을 시작했습니다.');
     } catch (error: unknown) {
+      if ((error as { name?: string })?.name === 'CanceledError' || (error as { name?: string })?.name === 'AbortError') {
+        setModal('none');
+        return;
+      }
       const message = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
       setFormError(message ?? '에셋 업로드에 실패했습니다.');
     } finally {
+      uploadAbortController.current = null;
       setUploading(false);
       setUploadPct(0);
     }
@@ -1424,6 +1470,24 @@ export default function AssetsPage() {
           />
           <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400">⌕</span>
         </div>
+        <button
+          type="button"
+          onClick={() => {
+            setSearch('');
+            setSelectedCategoryId(undefined);
+            setFilterUploadMode('all');
+            setFilterStatus('all');
+            setFilterType('all');
+            setCurrentPage(1);
+          }}
+          className="flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors shrink-0"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+          </svg>
+          초기화
+        </button>
         <FilterDropdown
           label="카테고리"
           value={selectedCategoryId != null ? String(selectedCategoryId) : 'all'}
@@ -1437,9 +1501,9 @@ export default function AssetsPage() {
           }}
         />
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <FilterDropdown
-          label="구분"
+      <div className="flex flex-col gap-2">
+        <RadioFilter
+          label="구　　분"
           value={filterUploadMode}
           options={[
             { value: 'all', label: '전체' },
@@ -1450,9 +1514,8 @@ export default function AssetsPage() {
             setFilterUploadMode(v);
             setCurrentPage(1);
           }}
-          className="min-w-[90px]"
         />
-        <FilterDropdown
+        <RadioFilter
           label="처리 상태"
           value={filterStatus}
           options={[
@@ -1467,9 +1530,8 @@ export default function AssetsPage() {
             setFilterStatus(v);
             setCurrentPage(1);
           }}
-          className="min-w-[120px]"
         />
-        <FilterDropdown
+        <RadioFilter
           label="파일 타입"
           value={filterType}
           options={[
@@ -1483,26 +1545,7 @@ export default function AssetsPage() {
             setFilterType(v);
             setCurrentPage(1);
           }}
-          className="min-w-[120px]"
         />
-        <button
-          type="button"
-          onClick={() => {
-            setSearch('');
-            setSelectedCategoryId(undefined);
-            setFilterUploadMode('all');
-            setFilterStatus('all');
-            setFilterType('all');
-            setCurrentPage(1);
-          }}
-          className="flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-500 hover:border-gray-400 hover:text-gray-700 transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-          </svg>
-          초기화
-        </button>
       </div>
       <div className="text-sm text-gray-500">총 {filtered.length}건</div>
       {loading ? (
@@ -1675,7 +1718,7 @@ export default function AssetsPage() {
       )}
 
       {modal === 'create' && (
-        <Modal title="에셋 업로드" onClose={() => (!uploading ? setModal('none') : undefined)}>
+        <Modal title="에셋 업로드" onClose={() => { uploadAbortController.current?.abort(); setModal('none'); }}>
           <div className="px-6 py-6 space-y-5">
             {/* 에셋명 */}
             <div>
@@ -1903,9 +1946,8 @@ export default function AssetsPage() {
           <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-2">
             <button
               type="button"
-              onClick={() => setModal('none')}
-              disabled={uploading}
-              className="px-4 py-2 rounded-lg border border-gray-300 text-sm hover:bg-white disabled:opacity-40"
+              onClick={() => { uploadAbortController.current?.abort(); setModal('none'); }}
+              className="px-4 py-2 rounded-lg border border-gray-300 text-sm hover:bg-white"
             >
               취소
             </button>

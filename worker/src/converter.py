@@ -264,6 +264,7 @@ def _full_gaussian(processed_dir: str, output_dir: str, report, obb_params: dict
             "--output-dir", out_dir,
             "--max-num-iterations", str(max_iterations),
             "--pipeline.model.cull-alpha-thresh", "0.005",
+            "--pipeline.datamanager.cache-images", "gpu",
             "--viewer.quit-on-train-completion", "True",
         ]
         if load_dir:
@@ -695,31 +696,6 @@ def _point_cloud_from_colmap(processed_dir: str, output_dir: str, report, qualit
     colmap_sparse = next((p for p in colmap_sparse_candidates if os.path.isdir(p)), None)
 
     report(10)
-
-    nerf_iterations = cfg["nerf_iterations"]
-    print(f"[Converter][PointCloud] nerfacto -> pointcloud export ({num_points} points, iter={nerf_iterations}, quality={quality_preset})")
-    train_dir  = os.path.join(output_dir, "train")
-    export_dir = os.path.join(output_dir, "export")
-    os.makedirs(export_dir, exist_ok=True)
-    try:
-        _run_cmd(
-            ["ns-train", "nerfacto", "--data", processed_dir, "--output-dir", train_dir, "--max-num-iterations", str(nerf_iterations), "--viewer.quit-on-train-completion", "True"],
-            report_range=(10, 70), report_fn=report, stop_check=stop_check,
-        )
-        config_path = _find_nerfstudio_config(train_dir)
-        _run_cmd(
-            ["ns-export", "pointcloud", "--load-config", config_path, "--output-dir", export_dir, "--num-points", str(num_points)],
-            report_range=(70, 95), report_fn=report, stop_check=stop_check,
-        )
-        plys = glob_module.glob(os.path.join(export_dir, "*.ply"))
-        if plys:
-            shutil.copy(plys[0], output_ply)
-            report(99)
-            return output_ply
-    except Exception as e:
-        if "__asset_deleted__" in str(e):
-            raise
-        print(f"[Converter][PointCloud] nerfstudio pointcloud export 실패, COLMAP sparse fallback 시도: {e}")
 
     if colmap_sparse:
         print(f"[Converter][PointCloud] COLMAP sparse -> PLY: {colmap_sparse}")
@@ -1706,7 +1682,7 @@ def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, sto
             time.sleep(3)
             try:
                 if stop_check and stop_check():
-                    print("[Converter] 에셋 삭제 감지: 프로세스 강제 종료")
+                    print("[Converter] 작업 취소/삭제 감지: 프로세스 강제 종료")
                     stopped_by_deletion[0] = True
                     proc.kill()
                     try:

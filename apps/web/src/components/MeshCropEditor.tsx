@@ -3313,6 +3313,44 @@ export default function MeshCropEditor({
     showToast(`추출 미리보기 — ${(result.positions.length / 3) | 0}개 포인트 (다운로드하려면 [다운로드] 클릭)`);
   }, [getActiveObb, getLocalObb, showToast]);
 
+  // ── 추출 직접 다운로드 (미리보기 없이 바로 PLY 저장) ──────────
+  const handleDirectExtractDownload = useCallback(async () => {
+    const full = fullDataRef.current;
+    if (!full) {
+      showToast('포인트 클라우드가 아직 로드되지 않았습니다.', 'err');
+      return;
+    }
+    setExtractLoading(true);
+    try {
+      const activeObb = getLocalObb(getActiveObb());
+      const result = filterPointsInObb(
+        full.positions,
+        full.colors,
+        activeObb.center,
+        activeObb.rotation,
+        activeObb.scale,
+      );
+      if (!result) {
+        showToast('선택 영역 안에 포인트가 없습니다.', 'err');
+        return;
+      }
+      const [px, py, pz] = previewCenterRef.current;
+      const worldPos = new Float32Array(result.positions.length);
+      for (let i = 0; i < result.positions.length; i += 3) {
+        worldPos[i] = result.positions[i] + px;
+        worldPos[i + 1] = result.positions[i + 1] + py;
+        worldPos[i + 2] = result.positions[i + 2] + pz;
+      }
+      const blob = writePlyBinary(worldPos, result.colors);
+      downloadBlob(blob, `${downloadBaseName.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'extract'}-extract.ply`);
+      showToast(`추출 다운로드 완료 — ${(result.positions.length / 3) | 0}개 포인트`);
+    } catch (e: unknown) {
+      showToast((e as Error).message ?? '다운로드 실패', 'err');
+    } finally {
+      setExtractLoading(false);
+    }
+  }, [downloadBaseName, getActiveObb, getLocalObb, showToast]);
+
   // ── 추출 취소 (원본 복원) ────────────────────────────────────
   const handleExtractCancel = useCallback(() => {
     const full = fullDataRef.current;
@@ -4234,19 +4272,6 @@ export default function MeshCropEditor({
               <Icon d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
               원래대로
             </button>
-            {onSaveExtractedAsset && (
-              <button
-                onClick={() => void handleSaveExtractedAsset()}
-                disabled={busy || saveExtractedAssetLoading}
-                className="flex items-center gap-1.5 px-3 py-1 text-xs rounded border border-cyan-500 text-cyan-300 hover:bg-cyan-900/40 disabled:opacity-40"
-              >
-                <Icon
-                  d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z"
-                  className="w-3.5 h-3.5"
-                />
-                {saveExtractedAssetLoading ? '저장 중...' : '추출 에셋 저장'}
-              </button>
-            )}
           </>
         )}
 
@@ -4401,6 +4426,20 @@ export default function MeshCropEditor({
               />
               {extractLoading ? '추출 중...' : isGlb ? '추출 다운로드' : '추출 미리보기'}
             </button>
+            {!isGlb && (
+              <button
+                onClick={() => void handleDirectExtractDownload()}
+                disabled={busy}
+                title="미리보기 없이 바로 추출 다운로드"
+                className="flex items-center gap-1.5 px-3 py-1 text-xs rounded border border-emerald-700 text-emerald-400 hover:bg-emerald-900/40 disabled:opacity-40"
+              >
+                <Icon
+                  d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"
+                  className="w-3.5 h-3.5"
+                />
+                추출 다운로드
+              </button>
+            )}
             {isGlb && onSaveExtractedAsset && (
               <button
                 onClick={() => void handleSaveExtractedAsset()}

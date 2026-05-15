@@ -163,7 +163,7 @@ export const assetsApi = {
   getNerfFrames: (id: string) => api.get<{ count: number; paths: string[] }>(`/assets/${id}/nerf-frames`),
   getNerfFrameUrl: (id: string, framePath: string): string =>
     `/api/assets/${id}/nerf-frame?path=${encodeURIComponent(framePath)}`,
-  upload: (file: File, onProgress?: (pct: number) => void) => {
+  upload: (file: File, onProgress?: (pct: number) => void, signal?: AbortSignal) => {
     const form = new FormData();
     form.append('file', file);
     return api.post<{ objectName: string; originalName: string; size: number; mimetype: string; url: string }>(
@@ -174,6 +174,7 @@ export const assetsApi = {
         onUploadProgress: (e: { total?: number; loaded: number }) => {
           if (onProgress && e.total) onProgress(Math.round((e.loaded * 100) / e.total));
         },
+        signal,
       },
     );
   },

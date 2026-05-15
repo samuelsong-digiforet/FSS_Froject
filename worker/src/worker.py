@@ -5,7 +5,7 @@ import time
 import redis
 from storage import download_object, upload_object
 from converter import preprocess_to_fly, convert_from_processed, convert_asset
-from database import update_asset_status, update_asset_progress, update_awaiting_crop, is_asset_deleted, update_texture_objects, update_quality_metrics, merge_asset_metadata, AssetDeletedException
+from database import update_asset_status, update_asset_progress, update_awaiting_crop, reset_processing_assets, mark_asset_processing, is_asset_cancelled, update_texture_objects, update_quality_metrics, merge_asset_metadata, AssetDeletedException
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -528,22 +528,29 @@ def recover_stalled_jobs(r: redis.Redis, wait_key: str, active_key: str):
     if not stalled:
         return
 
-    print(f"[Worker] Stalled job {len(stalled)}개 발견 — 재시도 큐로 복구 중...")
+    print(f"[Worker] Stalled job {len(stalled)}개 발견 — 복구 중...")
     for job_id in stalled:
         job_key      = f"bull:{QUEUE_NAME}:{job_id}"
         job_data_raw = r.hget(job_key, "data")
+        asset_id = None
         if job_data_raw:
             try:
                 data     = json.loads(job_data_raw)
                 asset_id = data.get("assetId")
-                if asset_id:
-                    update_asset_status(asset_id, "pending", progress=0)
-                    print(f"[Worker] Asset {asset_id} → pending 으로 리셋")
             except Exception as e:
-                print(f"[Worker] Stalled job {job_id} 리셋 실패: {e}")
+                print(f"[Worker] Stalled job {job_id} 데이터 파싱 실패: {e}")
 
-        # active → wait 앞쪽으로 이동 (우선 처리)
         r.lrem(active_key, 1, job_id)
+
+        # 사용자가 취소(failed)한 job은 큐에서 제거만 하고 재시작하지 않음
+        if asset_id and is_asset_cancelled(asset_id):
+            print(f"[Worker] Job {job_id} (Asset {asset_id}) 취소 상태 — 복구 건너뜀")
+            continue
+
+        if asset_id:
+            update_asset_status(asset_id, "pending", progress=0)
+            print(f"[Worker] Asset {asset_id} → pending 으로 리셋")
+
         r.lpush(wait_key, job_id)
         print(f"[Worker] Job {job_id} → wait 큐로 복구")
 
@@ -557,6 +564,7 @@ def main():
 
     # 이전 실행에서 중단된 job 복구
     recover_stalled_jobs(r, wait_key, active_key)
+    reset_processing_assets()
 
     print("[Worker] Listening for jobs...")
 
@@ -652,7 +660,7 @@ def process_job(job_id: str, data: dict) -> str:
         print(f"[Worker] Job {job_id} progress: {pct}%")
 
     def stop_check() -> bool:
-        return is_asset_deleted(asset_id)
+        return is_asset_cancelled(asset_id)
 
     if stage == "regenerate_preview":
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -660,7 +668,7 @@ def process_job(job_id: str, data: dict) -> str:
         print(f"[Worker] Job {job_id} regenerate_preview done")
         return data.get("outputObject", "")
 
-    update_asset_status(asset_id, "processing", progress=0)
+    mark_asset_processing(asset_id)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         metrics: dict = {}

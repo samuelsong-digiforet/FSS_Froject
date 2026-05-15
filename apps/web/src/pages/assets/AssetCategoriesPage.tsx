@@ -260,17 +260,17 @@ export default function AssetCategoriesPage() {
       </div>
 
       {/* 테이블 */}
-      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-[#2d4a7a] text-white">
+            <tr className="bg-[#2d4a7a] text-white divide-x divide-[#4a6a9a]">
               <th className="px-6 py-3 text-center font-medium w-20">NO</th>
               <th className="px-6 py-3 text-center font-medium">카테고리명</th>
               <th className="px-6 py-3 text-center font-medium">최초 등록일시</th>
               <th className="px-6 py-3 text-center font-medium">최초 등록자명</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-gray-100">
             {loading ? (
               <tr><td colSpan={4} className="text-center py-10 text-gray-400">로딩 중...</td></tr>
             ) : categories.length === 0 ? (
@@ -280,13 +280,14 @@ export default function AssetCategoriesPage() {
                 <tr
                   key={cat.id}
                   onClick={() => perm.detail && openDetail(cat)}
-                  className={`border-t border-gray-100 transition-colors
+                  className={`divide-x divide-gray-200 transition-colors
+                    ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
                     ${perm.detail ? 'hover:bg-blue-50 cursor-pointer' : ''}`}
                 >
-                  <td className="px-6 py-3 text-center text-gray-600">{total - (page - 1) * limit - idx}</td>
-                  <td className="px-6 py-3 text-center text-gray-800">{cat.name}</td>
-                  <td className="px-6 py-3 text-center text-gray-600">{formatDate(cat.createdAt)}</td>
-                  <td className="px-6 py-3 text-center text-gray-600">{cat.createdBy?.fullName ?? '-'}</td>
+                  <td className="px-6 py-4 text-center text-gray-600">{total - (page - 1) * limit - idx}</td>
+                  <td className="px-6 py-4 text-center text-gray-800">{cat.name}</td>
+                  <td className="px-6 py-4 text-center text-gray-600">{formatDate(cat.createdAt)}</td>
+                  <td className="px-6 py-4 text-center text-gray-600">{cat.createdBy?.fullName ?? '-'}</td>
                 </tr>
               ))
             )}

@@ -392,8 +392,8 @@ export class AssetsService {
     });
 
     await this.assetRepo.update(id, {
-      status: AssetStatus.PROCESSING,
-      progress: 55,
+      status: AssetStatus.PENDING,
+      progress: 0,
       jobId: job,
       metadata: {
         ...metadata,
@@ -465,8 +465,8 @@ export class AssetsService {
         });
 
     await this.assetRepo.update(id, {
-      status: AssetStatus.PROCESSING,
-      progress: colmapObject ? 55 : 0,
+      status: AssetStatus.PENDING,
+      progress: 0,
       jobId: job,
       errorMessage: null,
       metadata: {
@@ -536,7 +536,7 @@ export class AssetsService {
       description: cloneDescription,
       type: source.type,
       status: AssetStatus.PENDING,
-      progress: colmapObject ? 55 : 0,
+      progress: 0,
       sourceObject: source.sourceObject,
       previewObject: source.previewObject ?? undefined,
       categoryId: source.categoryId ?? undefined,
@@ -571,7 +571,8 @@ export class AssetsService {
             userId,
           });
       await this.assetRepo.update(saved.id, {
-        status: colmapObject ? AssetStatus.PROCESSING : AssetStatus.PENDING,
+        status: AssetStatus.PENDING,
+        progress: 0,
         jobId: job,
       });
     } catch (err) {

@@ -134,6 +134,9 @@ export default function LoginPage() {
               {loading ? '로그인 중...' : '로그인'}
             </button>
           </form>
+          <p className="text-xs text-gray-500 text-center mt-3">
+            admin / 12345678
+          </p>
         </div>
       </div>
     </div>

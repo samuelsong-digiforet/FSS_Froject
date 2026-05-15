@@ -44,7 +44,11 @@
       "Bash(curl -s -X POST http://localhost/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"admin1234\"}')",
       "Bash(python3 -m json.tool)",
       "Bash(curl -s -X POST http://localhost/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"Admin1234!\"}')",
-      "Bash(curl -s -X POST http://localhost/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"12345678\"}')"
+      "Bash(curl -s -X POST http://localhost/api/auth/login -H \"Content-Type: application/json\" -d '{\"username\":\"admin\",\"password\":\"12345678\"}')",
+      "Bash(docker port *)",
+      "PowerShell(New-NetFirewallRule -DisplayName \"FSS Vite Dev 5173\" -Direction Inbound -Protocol TCP -LocalPort 5173 -Action Allow 2>&1)",
+      "WebFetch(domain:docs.nerf.studio)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

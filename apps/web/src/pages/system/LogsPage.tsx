@@ -135,10 +135,10 @@ export default function LogsPage() {
       </div>
 
       {/* 테이블 */}
-      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-[#2d4a7a] text-white">
+            <tr className="bg-[#2d4a7a] text-white divide-x divide-[#4a6a9a]">
               <th className="px-4 py-3 text-center font-medium w-20">NO</th>
               <th className="px-4 py-3 text-center font-medium">아이디</th>
               <th className="px-4 py-3 text-center font-medium">사용자명</th>
@@ -149,7 +149,7 @@ export default function LogsPage() {
               <th className="px-4 py-3 text-center font-medium">기능</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-gray-100">
             {loading ? (
               <tr>
                 <td colSpan={8} className="text-center py-10 text-gray-400">로딩 중...</td>
@@ -160,17 +160,17 @@ export default function LogsPage() {
               </tr>
             ) : (
               logs.map((log, idx) => (
-                <tr key={log.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-3 text-center text-gray-600">
+                <tr key={log.id} className={`divide-x divide-gray-200 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors`}>
+                  <td className="px-4 py-4 text-center text-gray-600">
                     {total - (page - 1) * limit - idx}
                   </td>
-                  <td className="px-4 py-3 text-center text-gray-800">{log.username ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-800">{log.fullName ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{formatDate(log.accessedAt)}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{log.ip ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{log.device ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{log.menuName ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{log.action ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-800">{log.username ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-800">{log.fullName ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{formatDate(log.accessedAt)}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{log.ip ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{log.device ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{log.menuName ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{log.action ?? '-'}</td>
                 </tr>
               ))
             )}

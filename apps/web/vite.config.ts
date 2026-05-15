@@ -28,9 +28,10 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
+    allowedHosts: ['f.meta-factory.kr'],
     watch: {
-      usePolling: true,      // Windows 파일 변경 감지
-      interval: 1000,        // 1초마다 폴링
+      usePolling: true, // Windows 파일 변경 감지
+      interval: 1000, // 1초마다 폴링
     },
     proxy: {
       '/api': {

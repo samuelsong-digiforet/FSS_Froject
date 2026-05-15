@@ -400,10 +400,10 @@ export default function UsersPage() {
       </div>
 
       {/* 테이블 */}
-      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+      <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="bg-[#2d4a7a] text-white">
+            <tr className="bg-[#2d4a7a] text-white divide-x divide-[#4a6a9a]">
               <th className="px-4 py-3 text-center font-medium w-16">NO</th>
               <th className="px-4 py-3 text-center font-medium">승인 여부</th>
               <th className="px-4 py-3 text-center font-medium">아이디</th>
@@ -413,7 +413,7 @@ export default function UsersPage() {
               <th className="px-4 py-3 text-center font-medium">최근 접속일시</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-gray-100">
             {loading ? (
               <tr><td colSpan={7} className="text-center py-10 text-gray-400">로딩 중...</td></tr>
             ) : users.length === 0 ? (
@@ -423,21 +423,22 @@ export default function UsersPage() {
                 <tr
                   key={user.id}
                   onClick={() => perm.detail && openDetail(user)}
-                  className={`border-t border-gray-100 transition-colors
+                  className={`divide-x divide-gray-200 transition-colors
+                    ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
                     ${perm.detail ? 'hover:bg-blue-50 cursor-pointer' : ''}`}
                 >
-                  <td className="px-4 py-3 text-center text-gray-600">{total - idx}</td>
-                  <td className="px-4 py-3 text-center">
+                  <td className="px-4 py-4 text-center text-gray-600">{total - idx}</td>
+                  <td className="px-4 py-4 text-center">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium
                       ${user.isApproved ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'}`}>
                       {user.isApproved ? '승인' : '미승인'}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-center text-gray-800">{user.username}</td>
-                  <td className="px-4 py-3 text-center text-gray-800">{user.fullName}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{formatDate(user.createdAt)}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{user.createdBy?.fullName ?? '-'}</td>
-                  <td className="px-4 py-3 text-center text-gray-600">{formatDate(user.lastLoginAt)}</td>
+                  <td className="px-4 py-4 text-center text-gray-800">{user.username}</td>
+                  <td className="px-4 py-4 text-center text-gray-800">{user.fullName}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{formatDate(user.createdAt)}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{user.createdBy?.fullName ?? '-'}</td>
+                  <td className="px-4 py-4 text-center text-gray-600">{formatDate(user.lastLoginAt)}</td>
                 </tr>
               ))
             )}
