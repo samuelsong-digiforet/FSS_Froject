@@ -33,7 +33,7 @@ QUALITY_PRESETS = {
         "nerf_iterations": 5000,
         "point_cloud_points": 300000,
         "mesh_sample_points": 300000,
-        "mesh_target_faces": 30000,
+        "mesh_target_faces": 50000,
         "mesh_psr_depth": 7,
     },
     "normal": {
@@ -41,7 +41,7 @@ QUALITY_PRESETS = {
         "nerf_iterations": 15000,
         "point_cloud_points": 700000,
         "mesh_sample_points": 700000,
-        "mesh_target_faces": 50000,
+        "mesh_target_faces": 100000,
         "mesh_psr_depth": 9,
     },
     "precise": {
@@ -49,8 +49,8 @@ QUALITY_PRESETS = {
         "nerf_iterations": 30000,
         "point_cloud_points": 1000000,
         "mesh_sample_points": 1000000,
-        "mesh_target_faces": 100000,
-        "mesh_psr_depth": 11,
+        "mesh_target_faces": 500000,
+        "mesh_psr_depth": 12,
     },
 }
 DEFAULT_QUALITY_PRESET = "fast"
@@ -151,7 +151,7 @@ def preprocess_to_fly(input_path: str, work_dir: str, progress_callback=None, st
     print("[Converter][Stage1] COLMAP 카메라 캘리브레이션 중...")
     try:
         _run_cmd(
-            ["ns-process-data", "images", "--data", frames_dir, "--output-dir", processed_dir, "--no-gpu", "--num-downscales", "0"],
+            ["ns-process-data", "images", "--data", frames_dir, "--output-dir", processed_dir, "--num-downscales", "0"],
             report_range=(10, 50), report_fn=report, stop_check=stop_check,
         )
     except Exception as e:

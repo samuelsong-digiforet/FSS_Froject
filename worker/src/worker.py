@@ -2,7 +2,10 @@ import os
 import json
 import tempfile
 import time
+import torch
 import redis
+
+torch.set_float32_matmul_precision('high')
 from storage import download_object, upload_object
 from converter import preprocess_to_fly, convert_from_processed, convert_asset
 from database import update_asset_status, update_asset_progress, update_awaiting_crop, reset_processing_assets, mark_asset_processing, is_asset_cancelled, update_texture_objects, update_quality_metrics, merge_asset_metadata, AssetDeletedException
@@ -521,14 +524,15 @@ def _upload_output(asset_id: str, output_path: str) -> str:
 
 def recover_stalled_jobs(r: redis.Redis, wait_key: str, active_key: str):
     """
-    워커 재시작 시 active 큐에 남은 stalled job을 wait 큐로 되돌리고
-    DB 상태를 pending으로 리셋한다.
+    워커 재시작 시 active 큐에 남은 stalled job을 큐에서 제거한다.
+    재시작으로 인해 중단된 job은 재큐잉하지 않으며, DB 상태는
+    reset_processing_assets()에서 failed로 처리된다.
     """
     stalled = r.lrange(active_key, 0, -1)
     if not stalled:
         return
 
-    print(f"[Worker] Stalled job {len(stalled)}개 발견 — 복구 중...")
+    print(f"[Worker] Stalled job {len(stalled)}개 발견 — active 큐에서 제거 (재큐잉 안 함)")
     for job_id in stalled:
         job_key      = f"bull:{QUEUE_NAME}:{job_id}"
         job_data_raw = r.hget(job_key, "data")
@@ -541,18 +545,8 @@ def recover_stalled_jobs(r: redis.Redis, wait_key: str, active_key: str):
                 print(f"[Worker] Stalled job {job_id} 데이터 파싱 실패: {e}")
 
         r.lrem(active_key, 1, job_id)
-
-        # 사용자가 취소(failed)한 job은 큐에서 제거만 하고 재시작하지 않음
-        if asset_id and is_asset_cancelled(asset_id):
-            print(f"[Worker] Job {job_id} (Asset {asset_id}) 취소 상태 — 복구 건너뜀")
-            continue
-
-        if asset_id:
-            update_asset_status(asset_id, "pending", progress=0)
-            print(f"[Worker] Asset {asset_id} → pending 으로 리셋")
-
-        r.lpush(wait_key, job_id)
-        print(f"[Worker] Job {job_id} → wait 큐로 복구")
+        r.hset(job_key, mapping={"failedReason": "워커 재시작으로 인해 중단됨", "finishedOn": int(time.time() * 1000)})
+        print(f"[Worker] Job {job_id} (Asset {asset_id}) — active 큐에서 제거")
 
 
 def main():

@@ -269,7 +269,7 @@ export default function HomePage() {
       const t = assets.filter((a) => a.type === type);
       const success = t.filter((a) => a.status === 'done').length;
       const failure = t.filter((a) => a.status === 'failed').length;
-      const processing = t.filter((a) => a.status === 'processing' || a.status === 'pending' || a.status === 'awaiting_crop').length;
+      const processing = t.filter((a) => a.status === 'processing' || a.status === 'awaiting_crop').length;
       return {
         type,
         total: t.length,

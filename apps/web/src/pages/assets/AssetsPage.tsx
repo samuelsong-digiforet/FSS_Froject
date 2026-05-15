@@ -455,25 +455,43 @@ function FilterDropdown<T extends string>({
   options,
   onChange,
   className,
+  searchable,
 }: {
   label: string;
   value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
   className?: string;
+  searchable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const ref = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const selected = options.find((o) => o.value === value);
   const displayLabel = value === ('all' as T) ? label : (selected?.label ?? label);
 
+  const filteredOptions = searchable && searchQuery.trim()
+    ? options.filter((o) => o.label.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+    : options;
+
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+        setSearchQuery('');
+      }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => {
+    if (open && searchable) {
+      setTimeout(() => searchRef.current?.focus(), 0);
+    }
+    if (!open) setSearchQuery('');
+  }, [open, searchable]);
 
   return (
     <div ref={ref} className={`relative select-none${className ? ` ${className}` : ''}`}>
@@ -497,20 +515,52 @@ function FilterDropdown<T extends string>({
         </span>
       </button>
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
-          {options.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => {
-                onChange(opt.value);
-                setOpen(false);
-              }}
-              className={`w-full px-4 py-2.5 text-left text-sm whitespace-nowrap hover:bg-gray-50 transition-colors ${value === opt.value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden">
+          {searchable && (
+            <div className="px-2 py-2 border-b border-gray-100">
+              <div className="flex items-center gap-1.5 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5">
+                <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+                </svg>
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="검색..."
+                  className="flex-1 text-sm bg-transparent outline-none text-gray-700 placeholder-gray-400 min-w-0"
+                  onClick={(e) => e.stopPropagation()}
+                />
+                {searchQuery && (
+                  <button type="button" onClick={() => setSearchQuery('')} className="text-gray-400 hover:text-gray-600">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="max-h-52 overflow-y-auto">
+            {filteredOptions.length === 0 ? (
+              <div className="px-4 py-3 text-sm text-gray-400 text-center">검색 결과 없음</div>
+            ) : (
+              filteredOptions.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt.value);
+                    setOpen(false);
+                    setSearchQuery('');
+                  }}
+                  className={`w-full px-4 py-2.5 text-left text-sm whitespace-nowrap hover:bg-gray-50 transition-colors ${value === opt.value ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}
+                >
+                  {opt.label}
+                </button>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -557,7 +607,7 @@ function RadioFilter<T extends string>({
 
 function StatusBadge({ status }: { status: AssetStatus }) {
   return (
-    <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${ASSET_STATUS_COLORS[status]}`}>
+    <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap ${ASSET_STATUS_COLORS[status]}`}>
       {ASSET_STATUS_LABELS[status]}
     </span>
   );
@@ -1493,12 +1543,13 @@ export default function AssetsPage() {
           value={selectedCategoryId != null ? String(selectedCategoryId) : 'all'}
           options={[
             { value: 'all', label: '전체' },
-            ...categories.map((c) => ({ value: String(c.id), label: c.name })),
+            ...[...categories].sort((a, b) => a.name.localeCompare(b.name, 'ko')).map((c) => ({ value: String(c.id), label: c.name })),
           ]}
           onChange={(v) => {
             setSelectedCategoryId(v === 'all' ? undefined : Number(v));
             setCurrentPage(1);
           }}
+          searchable
         />
       </div>
       <div className="flex flex-col gap-2">

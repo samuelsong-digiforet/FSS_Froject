@@ -17,10 +17,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libeigen3-dev libflann-dev libfreeimage-dev libgoogle-glog-dev \
     libgflags-dev libglew-dev libgtest-dev libsqlite3-dev libvulkan-dev \
     qtbase5-dev libqt5opengl5-dev libcgal-dev \
-    colmap \
+    libceres-dev \
+    libmetis-dev \
     ffmpeg \
     wget curl \
     && rm -rf /var/lib/apt/lists/*
+
+# COLMAP CUDA 빌드 (apt 버전은 GPU 미지원)
+# 75=Turing(RTX 20xx) 80=Ampere(A100) 86=Ampere(RTX 30xx) 89=Ada(RTX 40xx) 90=Hopper(H100)
+RUN git clone https://github.com/colmap/colmap.git /tmp/colmap && \
+    cd /tmp/colmap && git checkout 3.9.1 && \
+    mkdir build && cd build && \
+    cmake .. -GNinja \
+        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGUI_ENABLED=OFF && \
+    ninja install && \
+    rm -rf /tmp/colmap
 
 RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
     ln -sf /usr/bin/pip3 /usr/bin/pip
@@ -41,12 +54,11 @@ RUN patch /usr/local/lib/python3.10/dist-packages/nerfstudio/models/splatfacto.p
     splatfacto_opacity_entropy.patch
 
 # gsplat (3DGS 학습 엔진) - CUDA 빌드 필요
-RUN pip install --no-cache-dir gsplat==1.3.0
+RUN pip install --no-cache-dir gsplat==1.0.0
 
-# tiny-cuda-nn (tcnn) — nerfacto hash grid 가속
-# RTX 4050 (sm_89) 기준 빌드; 다른 GPU 사용 시 TCNN_CUDA_ARCHITECTURES 수정
+# tiny-cuda-nn (tcnn) — nerfacto hash grid 가속 (범용 멀티 아키텍처)
 RUN pip install --no-cache-dir ninja && \
-    TCNN_CUDA_ARCHITECTURES=89 pip install --no-cache-dir \
+    TCNN_CUDA_ARCHITECTURES="75;80;86;89;90" pip install --no-cache-dir \
         git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
 
 # 기타 의존성

@@ -42,12 +42,16 @@ def update_asset_status(asset_id: str, status: str, output_object: str = None, e
 
 
 def reset_processing_assets():
-    """Reset stale processing statuses before the single worker resumes the queue."""
+    """워커 재시작 시 처리 중이던 에셋을 failed로 표시 (재시작으로 인해 중단됨)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE assets SET status = 'pending', progress = 0, updated_at = NOW() WHERE status = 'processing'",
+                """UPDATE assets
+                   SET status = 'failed',
+                       error_message = '워커가 재시작되어 처리가 중단되었습니다. 다시 변환을 시도해 주세요.',
+                       updated_at = NOW()
+                   WHERE status = 'processing'""",
             )
         conn.commit()
     finally:
