@@ -218,6 +218,26 @@ function getObjectDisplayName(objectKey?: string | null): string {
   }
 }
 
+function getDisplayTextureObjects(asset: Asset): string[] {
+  const raw = asset.metadata?.textureObjects;
+  if (!Array.isArray(raw)) return [];
+
+  const seen = new Set<string>();
+  const textures = raw
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+
+  const hasPlainExtractedTexture = textures.some((obj) => /(?:^|\/)texture_\d+\.[a-z0-9]+$/i.test(obj));
+  if (!hasPlainExtractedTexture) return textures;
+
+  return textures.filter((obj) => !/(?:^|\/)texture_\d+_baseColorTexture\.[a-z0-9]+$/i.test(obj));
+}
+
 function getCategoryDisplayName(asset: Asset | null | undefined, categories: AssetCategory[]): string {
   if (!asset) return '-';
   if (asset.category?.name) return asset.category.name;
@@ -430,7 +450,7 @@ function Modal({
   return createPortal(
     <div className={`fixed inset-0 ${zClass} bg-black/60 p-4 flex items-center justify-center`}>
       <div
-        className={`w-full ${wide ? 'max-w-6xl' : 'max-w-2xl'} max-h-[90vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col`}
+        className={`w-full ${wide ? 'max-w-5xl' : 'max-w-2xl'} max-h-[90vh] bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col`}
       >
         <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
@@ -2016,7 +2036,7 @@ export default function AssetsPage() {
 
       {modal === 'detail' && selected && (
         <Modal title="에셋 상세" onClose={() => setModal('none')} wide>
-          <div className="px-6 py-6 space-y-6">
+          <div className="px-5 py-4 space-y-4">
             {/* 이름 + 버튼 행 */}
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -2196,8 +2216,8 @@ export default function AssetsPage() {
                 )}
               </div>
             </div>
-            <div className="grid gap-6 lg:grid-cols-[1.3fr_1fr] items-start">
-              <div className="flex flex-col gap-4">
+            <div className="grid gap-4 lg:grid-cols-[1.3fr_1fr] items-start">
+              <div className="flex flex-col gap-3">
                 {selectedProfile === 'mesh_interop_bundle' && (
                   <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
                     GLB, OBJ, STL, PLY 결과가 .ZIP 파일로 제공됩니다.
@@ -2350,7 +2370,7 @@ export default function AssetsPage() {
                   </div>
                 )}
               </div>
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 h-full">
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 space-y-3">
                 <div className="flex flex-wrap gap-2">
                   <StatusBadge status={selected.status} />
                   <span
@@ -2511,16 +2531,16 @@ export default function AssetsPage() {
       {modal === 'texture' &&
         selected &&
         (() => {
-          const textures = (selected.metadata?.textureObjects as string[] | undefined) ?? [];
+          const textures = getDisplayTextureObjects(selected);
           return (
-            <Modal title="메시 텍스쳐" onClose={() => setModal('detail')} wide>
-              <div className="px-3 py-3">
+            <Modal title="메시 텍스쳐" onClose={() => setModal('detail')}>
+              <div className="px-4 py-4">
                 {textures.length === 0 ? (
-                  <p className="text-sm text-gray-500 text-center py-10">텍스쳐 이미지가 없습니다.</p>
+                  <p className="text-sm text-gray-500 text-center py-8">텍스쳐 이미지가 없습니다.</p>
                 ) : (
-                  <div className="flex flex-wrap gap-3 justify-center">
+                  <div className="flex flex-wrap gap-3">
                     {textures.map((obj, i) => {
-                      const cardW = textures.length === 1 ? 'w-full max-w-2xl' : 'w-72 shrink-0';
+                      const cardW = textures.length === 1 ? 'w-full' : 'basis-64 flex-1';
                       return (
                         <div
                           key={obj}
@@ -2530,7 +2550,7 @@ export default function AssetsPage() {
                             <img
                               src={assetsApi.getStreamUrl(obj)}
                               alt={`텍스쳐 ${i + 1}`}
-                              className="w-full object-contain max-h-[55vh]"
+                              className="w-full object-contain max-h-[48vh]"
                             />
                           </div>
                           <div className="px-3 py-2 flex items-center justify-between">

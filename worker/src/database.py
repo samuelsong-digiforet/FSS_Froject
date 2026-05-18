@@ -41,18 +41,41 @@ def update_asset_status(asset_id: str, status: str, output_object: str = None, e
         conn.close()
 
 
-def reset_processing_assets():
-    """워커 재시작 시 처리 중이던 에셋을 failed로 표시 (재시작으로 인해 중단됨)."""
+def reset_processing_assets(requeued_asset_ids=None):
+    """Reset assets left in processing after a worker restart."""
+    requeued_asset_ids = [str(asset_id) for asset_id in (requeued_asset_ids or []) if asset_id is not None]
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE assets
-                   SET status = 'failed',
-                       error_message = '워커가 재시작되어 처리가 중단되었습니다. 다시 변환을 시도해 주세요.',
-                       updated_at = NOW()
-                   WHERE status = 'processing'""",
-            )
+            if requeued_asset_ids:
+                placeholders = ",".join(["%s"] * len(requeued_asset_ids))
+                cur.execute(
+                    f"""UPDATE assets
+                        SET status = 'pending',
+                            progress = 0,
+                            error_message = NULL,
+                            updated_at = NOW()
+                        WHERE status = 'processing'
+                          AND id IN ({placeholders})""",
+                    requeued_asset_ids,
+                )
+                cur.execute(
+                    f"""UPDATE assets
+                        SET status = 'failed',
+                            error_message = 'Worker restarted while conversion was running. Please retry conversion.',
+                            updated_at = NOW()
+                        WHERE status = 'processing'
+                          AND id NOT IN ({placeholders})""",
+                    requeued_asset_ids,
+                )
+            else:
+                cur.execute(
+                    """UPDATE assets
+                       SET status = 'failed',
+                           error_message = 'Worker restarted while conversion was running. Please retry conversion.',
+                           updated_at = NOW()
+                       WHERE status = 'processing'""",
+                )
         conn.commit()
     finally:
         conn.close()

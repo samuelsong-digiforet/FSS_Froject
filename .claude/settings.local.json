@@ -51,7 +51,10 @@
       "WebFetch(domain:github.com)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\USER\\\\Desktop\\\\FSS\\\\FSS\" -Recurse -Directory -ErrorAction SilentlyContinue)",
       "Bash(Select-Object -First 20)",
-      "Bash(Format-Table FullName)"
+      "Bash(Format-Table FullName)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git checkout *)"
     ]
   }
 }

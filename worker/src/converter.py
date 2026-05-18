@@ -33,7 +33,7 @@ QUALITY_PRESETS = {
         "nerf_iterations": 5000,
         "point_cloud_points": 300000,
         "mesh_sample_points": 300000,
-        "mesh_target_faces": 50000,
+        "mesh_target_faces": 30000,
         "mesh_psr_depth": 7,
     },
     "normal": {
@@ -41,7 +41,7 @@ QUALITY_PRESETS = {
         "nerf_iterations": 15000,
         "point_cloud_points": 700000,
         "mesh_sample_points": 700000,
-        "mesh_target_faces": 100000,
+        "mesh_target_faces": 50000,
         "mesh_psr_depth": 9,
     },
     "precise": {
@@ -49,8 +49,8 @@ QUALITY_PRESETS = {
         "nerf_iterations": 30000,
         "point_cloud_points": 1000000,
         "mesh_sample_points": 1000000,
-        "mesh_target_faces": 500000,
-        "mesh_psr_depth": 12,
+        "mesh_target_faces": 100000,
+        "mesh_psr_depth": 11,
     },
 }
 DEFAULT_QUALITY_PRESET = "fast"
@@ -151,7 +151,7 @@ def preprocess_to_fly(input_path: str, work_dir: str, progress_callback=None, st
     print("[Converter][Stage1] COLMAP 카메라 캘리브레이션 중...")
     try:
         _run_cmd(
-            ["ns-process-data", "images", "--data", frames_dir, "--output-dir", processed_dir, "--num-downscales", "0"],
+            ["ns-process-data", "images", "--data", frames_dir, "--output-dir", processed_dir],
             report_range=(10, 50), report_fn=report, stop_check=stop_check,
         )
     except Exception as e:
@@ -208,6 +208,9 @@ def convert_from_processed(asset_type: str, processed_dir: str, output_dir: str,
     def report(pct: int):
         if progress_callback:
             progress_callback(55 + min(pct, 44))  # 2단계는 55~99%
+
+    if asset_type in {"gaussian", "nerf", "mesh"}:
+        _ensure_processed_image_downscales(processed_dir, stop_check=stop_check)
 
     if asset_type == "gaussian":
         return _full_gaussian(processed_dir, output_dir, report, obb_params=obb_params, quality_preset=quality_preset, stop_check=stop_check, metrics_out=metrics_out)
@@ -375,6 +378,77 @@ def _collect_image_files(image_dir: str) -> list[str]:
         if os.path.isfile(path) and os.path.splitext(name)[1].lower() in img_exts:
             files.append(path)
     return files
+
+
+def _ensure_processed_image_downscales(processed_dir: str, factors: tuple[int, ...] = (2, 4, 8), stop_check=None):
+    """
+    Ensure Nerfstudio can auto-select a lower image resolution during stage 2.
+
+    Old processed tarballs may only contain the original `images` directory,
+    especially from runs made with `ns-process-data --num-downscales 0`.
+    Nerfstudio only auto-downscales if `images_2`, `images_4`, ... already
+    exist, so create the missing folders before training/export.
+    """
+    images_dir = os.path.join(processed_dir, "images")
+    if not os.path.isdir(images_dir):
+        return
+
+    image_paths = _collect_image_files(images_dir)
+    if not image_paths:
+        return
+
+    try:
+        from PIL import Image
+    except Exception as e:
+        print(f"[Converter][Downscale] Pillow unavailable, using original images only: {e}")
+        return
+
+    try:
+        with Image.open(image_paths[0]) as sample:
+            max_dim = max(sample.size)
+    except Exception as e:
+        print(f"[Converter][Downscale] sample image inspection failed: {e}")
+        return
+
+    needed_factors = [factor for factor in factors if max_dim / factor > 512]
+    if not needed_factors:
+        return
+
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+    for factor in needed_factors:
+        if stop_check and stop_check():
+            raise RuntimeError("__asset_deleted__")
+
+        target_dir = os.path.join(processed_dir, f"images_{factor}")
+        existing_count = len(_collect_image_files(target_dir))
+        if existing_count >= len(image_paths):
+            continue
+
+        os.makedirs(target_dir, exist_ok=True)
+        print(
+            f"[Converter][Downscale] creating images_{factor} "
+            f"({len(image_paths) - existing_count}/{len(image_paths)} missing)"
+        )
+
+        for src_path in image_paths:
+            if stop_check and stop_check():
+                raise RuntimeError("__asset_deleted__")
+
+            dst_path = os.path.join(target_dir, os.path.basename(src_path))
+            if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
+                continue
+
+            with Image.open(src_path) as img:
+                width, height = img.size
+                next_size = (max(1, width // factor), max(1, height // factor))
+                resized = img.resize(next_size, resampling)
+                ext = os.path.splitext(dst_path)[1].lower()
+                save_kwargs = {}
+                if ext in {".jpg", ".jpeg"}:
+                    if resized.mode in {"RGBA", "LA", "P"}:
+                        resized = resized.convert("RGB")
+                    save_kwargs = {"quality": 95, "optimize": True}
+                resized.save(dst_path, **save_kwargs)
 
 
 def _sample_evenly(items: list[str], limit: int) -> list[str]:
@@ -1645,6 +1719,8 @@ def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, sto
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
     )
     step_pattern = re.compile(r"Step.*?(\d+)/(\d+)")
+    rich_step_pattern = re.compile(r"^\s*(\d+)\s+\((\d+(?:\.\d+)?)%\)")
+    ansi_pattern = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     stopped_by_deletion = [False]
 
     def _read_stdout():
@@ -1652,21 +1728,28 @@ def _run_cmd(cmd: list, report_range: tuple, report_fn, timeout: int = 7200, sto
             line = line.rstrip()
             if line:
                 print(f"  [ns] {line}")
-            m = step_pattern.search(line)
+            clean_line = ansi_pattern.sub("", line)
+            m = step_pattern.search(clean_line)
             if m:
                 cur, total = int(m.group(1)), int(m.group(2))
                 if total > 0:
                     ratio = cur / total
                     pct = int(start_pct + ratio * (end_pct - start_pct))
                     report_fn(pct)
+            else:
+                rm = rich_step_pattern.search(clean_line)
+                if rm:
+                    ratio = max(0.0, min(1.0, float(rm.group(2)) / 100.0))
+                    pct = int(start_pct + ratio * (end_pct - start_pct))
+                    report_fn(pct)
             if metrics_out is not None:
-                pm = _PSNR_PATTERN.search(line)
+                pm = _PSNR_PATTERN.search(clean_line)
                 if pm:
                     try:
                         metrics_out["psnr"] = round(float(pm.group(1)), 4)
                     except ValueError:
                         pass
-                sm = _SSIM_PATTERN.search(line)
+                sm = _SSIM_PATTERN.search(clean_line)
                 if sm:
                     try:
                         val = float(sm.group(1))

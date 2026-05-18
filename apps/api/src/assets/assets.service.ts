@@ -67,6 +67,9 @@ const MESH_INTEROP_DOWNLOADS = {
 } as const;
 
 type MeshInteropDownloadFormat = keyof typeof MESH_INTEROP_DOWNLOADS;
+type JsonRecord = Record<string, unknown>;
+
+const MATERIAL_TEXTURE_SUFFIX = 'Texture';
 
 @Injectable()
 export class AssetsService {
@@ -771,11 +774,11 @@ export class AssetsService {
     assetIds: number[],
     userId: number,
   ): Promise<{ id: number; externalId: number; status: 'created' | 'updated' }[]> {
-    const tenantSchema = 'factory_love';
+    const tenantSchema = this.config.get<string>('FACTORY_SCHEMA_NAME')?.trim();
     const dtApiUrl = this.config.get<string>('FACTORY_API_URL');
     const fssApiKey = this.config.get<string>('FSS_API_KEY');
 
-    if (!dtApiUrl || !fssApiKey) {
+    if (!tenantSchema || !dtApiUrl || !fssApiKey) {
       throw new ServiceUnavailableException(
         '디지털 트윈 전송 서버 설정이 준비되지 않았습니다. 관리자에게 문의해주세요.',
       );
@@ -799,46 +802,36 @@ export class AssetsService {
           throw new BadRequestException(`승인되지 않은 에셋은 전송할 수 없습니다: ${assetId}`);
         }
 
-        const stat = await this.storage.statObject(asset.outputObject);
-        const fileSize = String(stat.size);
-        const fileExt = this.getObjectExtension(asset.outputObject);
-        const previewExt = asset.previewObject && asset.previewObject !== asset.outputObject
-          ? this.getObjectExtension(asset.previewObject)
-          : null;
         const assetMeta = this.asMetadataRecord(asset.metadata);
+        const modelObject = await this.getDigitalTwinGlbObject(asset, assetMeta);
+        const stat = await this.storage.statObject(modelObject);
+        const fileSize = String(stat.size);
+        const fileExt = 'glb';
 
         const modelKey = path.posix.join(tenantSchema, 'fss', String(assetId), `model.${fileExt}`);
-        const previewKey = previewExt && asset.previewObject && asset.previewObject !== asset.outputObject
-          ? path.posix.join(tenantSchema, 'fss', String(assetId), `preview.${previewExt}`)
-          : null;
 
-        await this.storage.copyToExternal(asset.outputObject, modelKey);
-        if (previewKey && asset.previewObject) {
-          await this.storage.copyToExternal(asset.previewObject, previewKey);
-        }
+        await this.storage.copyToExternal(modelObject, modelKey);
 
-        let coverKey = previewKey ?? modelKey;
-        let stripKey = previewKey ?? modelKey;
+        let coverKey = modelKey;
+        let stripKey = modelKey;
 
-        if (fileExt === 'glb' || fileExt === 'ply') {
-          try {
-            const res = await fetch(`${dtApiUrl}/asset/fss-generate-thumbnail`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-fss-api-key': fssApiKey },
-              body: JSON.stringify({ modelKey, fileExt }),
-            });
-            if (res.ok) {
-              const json = await res.json() as { data: { coverKey: string; stripKey: string } };
-              coverKey = json.data.coverKey;
-              stripKey = json.data.stripKey;
-              this.logger.log(`[Thumbnail generated] assetId=${assetId} coverKey=${coverKey}`);
-            } else {
-              const body = await res.text().catch(() => '');
-              this.logger.warn(`[Thumbnail generation failed] assetId=${assetId} status=${res.status} body=${body}`);
-            }
-          } catch (error) {
-            this.logger.warn(`[Thumbnail generation API error] assetId=${assetId} error=${error}`);
+        try {
+          const res = await fetch(`${dtApiUrl}/asset/fss-generate-thumbnail`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-fss-api-key': fssApiKey },
+            body: JSON.stringify({ modelKey, fileExt }),
+          });
+          if (res.ok) {
+            const json = await res.json() as { data: { coverKey: string; stripKey: string } };
+            coverKey = json.data.coverKey;
+            stripKey = json.data.stripKey;
+            this.logger.log(`[Thumbnail generated] assetId=${assetId} coverKey=${coverKey}`);
+          } else {
+            const body = await res.text().catch(() => '');
+            this.logger.warn(`[Thumbnail generation failed] assetId=${assetId} status=${res.status} body=${body}`);
           }
+        } catch (error) {
+          this.logger.warn(`[Thumbnail generation API error] assetId=${assetId} error=${error}`);
         }
 
         const pushPayload = (withExternalId: boolean) => JSON.stringify({
@@ -853,7 +846,7 @@ export class AssetsService {
           fileExt,
           fileSize,
           meta: Object.keys(assetMeta).length > 0 ? assetMeta : undefined,
-          isApprove: false,
+          isApprove: asset.approved,
         });
 
         let pushRes = await fetch(`${dtApiUrl}/asset/fss-push`, {
@@ -943,6 +936,141 @@ export class AssetsService {
     }
 
     return {};
+  }
+
+  private async getDigitalTwinGlbObject(asset: Asset, metadata: Record<string, unknown>): Promise<string> {
+    const candidates = [
+      metadata.representativeSceneObject,
+      asset.previewObject,
+      asset.outputObject,
+    ]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => value.trim());
+
+    const glbObject = candidates.find((objectName) => this.getObjectExtension(objectName) === 'glb');
+    if (!glbObject) {
+      throw new BadRequestException(
+        `디지털 트윈 전송은 텍스쳐가 포함된 GLB 파일만 가능합니다: ${asset.id}`,
+      );
+    }
+
+    const hasTexture = await this.hasEmbeddedGlbTexture(glbObject);
+    if (!hasTexture) {
+      throw new BadRequestException(
+        `텍스쳐가 포함된 GLB 파일만 디지털 트윈으로 전송할 수 있습니다: ${asset.id}`,
+      );
+    }
+
+    return glbObject;
+  }
+
+  private async hasEmbeddedGlbTexture(objectName: string): Promise<boolean> {
+    try {
+      const json = await this.readGlbJson(objectName);
+      const images = this.asRecordArray(json.images);
+      const textures = this.asRecordArray(json.textures);
+      const materials = this.asRecordArray(json.materials);
+      const embeddedTextureIndices = new Set<number>();
+
+      textures.forEach((texture, textureIndex) => {
+        const sourceIndex = this.asNonNegativeInteger(texture.source);
+        const image = sourceIndex === null ? null : images[sourceIndex];
+        if (image && this.isEmbeddedGlbImage(image)) {
+          embeddedTextureIndices.add(textureIndex);
+        }
+      });
+
+      if (embeddedTextureIndices.size === 0) {
+        return false;
+      }
+
+      const usedTextureIndices = new Set<number>();
+      materials.forEach((material) => this.collectMaterialTextureIndices(material, usedTextureIndices));
+
+      return [...usedTextureIndices].some((textureIndex) => embeddedTextureIndices.has(textureIndex));
+    } catch (error) {
+      this.logger.warn(
+        `[DigitalTwinExport] GLB texture inspection failed object=${objectName} error=${error}`,
+      );
+      return false;
+    }
+  }
+
+  private asRecordArray(value: unknown): JsonRecord[] {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is JsonRecord => !!item && typeof item === 'object' && !Array.isArray(item));
+  }
+
+  private asNonNegativeInteger(value: unknown): number | null {
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+  }
+
+  private isEmbeddedGlbImage(image: JsonRecord): boolean {
+    if (this.asNonNegativeInteger(image.bufferView) !== null) {
+      return true;
+    }
+
+    return typeof image.uri === 'string' && image.uri.startsWith('data:');
+  }
+
+  private collectMaterialTextureIndices(value: unknown, indices: Set<number>, key = ''): void {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+
+    const record = value as JsonRecord;
+    if (key.endsWith(MATERIAL_TEXTURE_SUFFIX)) {
+      const index = this.asNonNegativeInteger(record.index);
+      if (index !== null) {
+        indices.add(index);
+      }
+    }
+
+    for (const [childKey, childValue] of Object.entries(record)) {
+      this.collectMaterialTextureIndices(childValue, indices, childKey);
+    }
+  }
+
+  private async readGlbJson(objectName: string): Promise<Record<string, unknown>> {
+    const stream = await this.storage.getObjectStream(objectName);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let requiredBytes = 20;
+    const maxJsonChunkBytes = 16 * 1024 * 1024;
+
+    for await (const chunk of stream as AsyncIterable<Buffer | Uint8Array | string>) {
+      const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      chunks.push(bufferChunk);
+      total += bufferChunk.length;
+
+      const buffer = Buffer.concat(chunks, total);
+
+      if (total >= 20) {
+        if (buffer.toString('utf8', 0, 4) !== 'glTF') {
+          throw new BadRequestException('GLB 파일 형식이 아닙니다.');
+        }
+
+        const jsonChunkLength = buffer.readUInt32LE(12);
+        const chunkType = buffer.toString('ascii', 16, 20);
+
+        if (chunkType !== 'JSON') {
+          throw new BadRequestException('GLB JSON 청크를 찾을 수 없습니다.');
+        }
+
+        if (jsonChunkLength > maxJsonChunkBytes) {
+          throw new BadRequestException('GLB 메타데이터가 너무 큽니다.');
+        }
+
+        requiredBytes = 20 + jsonChunkLength;
+      }
+
+      if (total >= requiredBytes) {
+        const destroyable = stream as { destroy?: () => void };
+        destroyable.destroy?.();
+        const jsonText = buffer.subarray(20, requiredBytes).toString('utf8').trim();
+        return JSON.parse(jsonText) as Record<string, unknown>;
+      }
+    }
+
+    throw new BadRequestException('GLB JSON 청크를 읽을 수 없습니다.');
   }
 
   private isDirectUploadAsset(asset: Asset, metadata = this.asMetadataRecord(asset.metadata)): boolean {

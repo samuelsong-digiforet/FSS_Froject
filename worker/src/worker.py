@@ -286,21 +286,31 @@ def _run_regenerate_preview(asset_id: str, data: dict, tmpdir: str):
 
 def _upload_textures_from_zip(asset_id: str, zip_path: str, tmpdir: str) -> list:
     """ZIP 안의 텍스쳐 이미지를 MinIO에 업로드하고 경로 리스트 반환"""
+    import hashlib
     import zipfile as zipfile_mod
     IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.webp'}
     texture_objects = []
     try:
         tex_dir = os.path.join(tmpdir, "textures_extract")
         os.makedirs(tex_dir, exist_ok=True)
+        seen_texture_hashes = set()
         with zipfile_mod.ZipFile(zip_path, 'r') as zf:
             image_members = [m for m in zf.namelist()
                              if os.path.splitext(m)[-1].lower() in IMAGE_EXTS
                              and not m.startswith('__MACOSX')]
-            for i, member in enumerate(image_members):
+            for member in image_members:
                 ext = os.path.splitext(member)[-1].lower()
+                with zf.open(member) as src:
+                    content = src.read()
+                signature = hashlib.sha1(content).hexdigest()
+                if signature in seen_texture_hashes:
+                    continue
+                seen_texture_hashes.add(signature)
+
+                i = len(texture_objects)
                 extracted_path = os.path.join(tex_dir, f"texture_{i}{ext}")
-                with zf.open(member) as src, open(extracted_path, 'wb') as dst:
-                    dst.write(src.read())
+                with open(extracted_path, 'wb') as dst:
+                    dst.write(content)
                 object_name = f"textures/{asset_id}/texture_{i}{ext}"
                 mime = "image/png" if ext == ".png" else "image/jpeg"
                 upload_object(extracted_path, object_name, mime)
@@ -316,6 +326,8 @@ def _upload_textures_from_glb(asset_id: str, glb_path: str, tmpdir: str) -> list
     """GLB 파일에서 임베드된 텍스쳐를 추출해 MinIO에 업로드하고 경로 리스트 반환"""
     texture_objects = []
     try:
+        import hashlib
+        import io
         import trimesh
         scene = trimesh.load(glb_path, force="scene")
         if not isinstance(scene, trimesh.Scene) or len(scene.geometry) == 0:
@@ -324,11 +336,28 @@ def _upload_textures_from_glb(asset_id: str, glb_path: str, tmpdir: str) -> list
         tex_dir = os.path.join(tmpdir, "glb_textures")
         os.makedirs(tex_dir, exist_ok=True)
         idx = 0
+        seen_texture_hashes = set()
+
+        def _texture_hash(img):
+            try:
+                if hasattr(img, "convert") and hasattr(img, "tobytes"):
+                    normalized = img.convert("RGBA")
+                    return hashlib.sha1(normalized.tobytes()).hexdigest()
+                buffer = io.BytesIO()
+                img.save(buffer, format="PNG")
+                return hashlib.sha1(buffer.getvalue()).hexdigest()
+            except Exception:
+                return None
 
         def _save_and_upload(img, suffix=""):
             nonlocal idx
             if img is None:
                 return
+            signature = _texture_hash(img)
+            if signature is not None:
+                if signature in seen_texture_hashes:
+                    return
+                seen_texture_hashes.add(signature)
             img_path = os.path.join(tex_dir, f"texture_{idx}{suffix}.png")
             try:
                 img.save(img_path)
@@ -524,29 +553,49 @@ def _upload_output(asset_id: str, output_path: str) -> str:
 
 def recover_stalled_jobs(r: redis.Redis, wait_key: str, active_key: str):
     """
-    워커 재시작 시 active 큐에 남은 stalled job을 큐에서 제거한다.
-    재시작으로 인해 중단된 job은 재큐잉하지 않으며, DB 상태는
-    reset_processing_assets()에서 failed로 처리된다.
+    Requeue jobs left in active after a worker restart.
+
+    Job work directories are temporary, so restarted jobs begin again from their
+    original queue payload instead of trying to resume halfway through.
     """
     stalled = r.lrange(active_key, 0, -1)
     if not stalled:
-        return
+        return []
 
-    print(f"[Worker] Stalled job {len(stalled)}개 발견 — active 큐에서 제거 (재큐잉 안 함)")
+    print(f"[Worker] Stalled job {len(stalled)} found; requeueing to wait")
+    requeued_asset_ids = []
+
     for job_id in stalled:
-        job_key      = f"bull:{QUEUE_NAME}:{job_id}"
+        job_key = f"bull:{QUEUE_NAME}:{job_id}"
         job_data_raw = r.hget(job_key, "data")
         asset_id = None
+
         if job_data_raw:
             try:
-                data     = json.loads(job_data_raw)
+                data = json.loads(job_data_raw)
                 asset_id = data.get("assetId")
             except Exception as e:
-                print(f"[Worker] Stalled job {job_id} 데이터 파싱 실패: {e}")
+                print(f"[Worker] Failed to parse stalled job {job_id}: {e}")
 
-        r.lrem(active_key, 1, job_id)
-        r.hset(job_key, mapping={"failedReason": "워커 재시작으로 인해 중단됨", "finishedOn": int(time.time() * 1000)})
-        print(f"[Worker] Job {job_id} (Asset {asset_id}) — active 큐에서 제거")
+        r.lrem(active_key, 0, job_id)
+        if job_data_raw:
+            r.lrem(wait_key, 0, job_id)
+            r.hdel(job_key, "failedReason", "finishedOn", "returnvalue")
+            r.lpush(wait_key, job_id)
+            if asset_id is not None:
+                requeued_asset_ids.append(asset_id)
+            print(f"[Worker] Job {job_id} (Asset {asset_id}) requeued")
+        else:
+            r.hset(
+                job_key,
+                mapping={
+                    "failedReason": "job data missing after worker restart",
+                    "finishedOn": int(time.time() * 1000),
+                },
+            )
+            print(f"[Worker] Job {job_id} has no data; removed from active")
+
+    return requeued_asset_ids
 
 
 def main():
@@ -557,8 +606,8 @@ def main():
     active_key = f"bull:{QUEUE_NAME}:active"
 
     # 이전 실행에서 중단된 job 복구
-    recover_stalled_jobs(r, wait_key, active_key)
-    reset_processing_assets()
+    requeued_asset_ids = recover_stalled_jobs(r, wait_key, active_key)
+    reset_processing_assets(requeued_asset_ids)
 
     print("[Worker] Listening for jobs...")
 

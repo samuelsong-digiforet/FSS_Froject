@@ -10,8 +10,8 @@ export default function LoginPage() {
   const { setToken, setUser } = useAuthStore();
   const { setPermissions, setLoaded } = usePermissionStore();
 
-  const [userId, setUserId] = useState('');
-  const [password, setPassword] = useState('');
+  const [userId, setUserId] = useState('admin');
+  const [password, setPassword] = useState('12345678');
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -75,6 +75,7 @@ export default function LoginPage() {
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
                 placeholder="아이디를 입력하세요"
+                autoFocus
                 required
                 className="w-full bg-gray-800 text-white rounded-lg px-4 py-3
                            border border-gray-700 focus:border-sky-500
@@ -134,9 +135,6 @@ export default function LoginPage() {
               {loading ? '로그인 중...' : '로그인'}
             </button>
           </form>
-          <p className="text-xs text-gray-500 text-center mt-3">
-            admin / 12345678
-          </p>
         </div>
       </div>
     </div>

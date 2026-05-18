@@ -1627,6 +1627,7 @@ function EditorScene({
   const [dragging, setDragging] = useState(false);
   const isGlb = /\.(glb|gltf)(\?|$)/i.test(flyUrl);
   const isGaussian = assetType === 'gaussian' && !isGlb;
+  const pointPickingMode = measureMode || vraMode;
 
   useEffect(() => {
     cameraRef.current = camera;
@@ -1637,12 +1638,12 @@ function EditorScene({
 
   // 측정 모드 전환 시 dragging 상태 초기화 (OrbitControls 비활성화 방지)
   useEffect(() => {
-    if (measureMode) setDragging(false);
-  }, [measureMode]);
+    if (pointPickingMode) setDragging(false);
+  }, [pointPickingMode]);
 
   // 측정 모드 클릭: PLY(Points) 또는 GLB(Mesh) 모두 지원
   useEffect(() => {
-    if (!measureMode || gdtMode || annotationMoveMode) return;
+    if (!pointPickingMode || gdtMode || annotationMoveMode) return;
     const canvas = gl.domElement;
 
     const handleClick = (e: MouseEvent) => {
@@ -1690,7 +1691,7 @@ function EditorScene({
 
     canvas.addEventListener('click', handleClick);
     return () => canvas.removeEventListener('click', handleClick);
-  }, [measureMode, gdtMode, annotationMoveMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onMeasureClick]);
+  }, [pointPickingMode, gdtMode, annotationMoveMode, camera, raycaster, gl, isGlb, glbGroupRef, pointsRef, onMeasureClick]);
 
   // GD&T 모드 클릭
   useEffect(() => {
@@ -1779,7 +1780,7 @@ function EditorScene({
         onObbChange={onObbChange}
         onLiveObbChange={onLiveObbChange}
         onDraggingChange={setDragging}
-        visible={!measureMode && !cutMode}
+        visible={!pointPickingMode && !cutMode}
         assetGroupRef={assetGroupRef}
       />
       {cutSelection?.kind === 'points' && (
@@ -1811,17 +1812,15 @@ function EditorScene({
       <OrbitControls
         makeDefault
         enabled={!dragging && !cutMode}
-        enableRotate={(!measureMode || (vraMode && annotationMoveMode)) && !cutMode && !gdtMode}
+        enableRotate={!cutMode && ((!pointPickingMode && !gdtMode) || annotationMoveMode)}
         mouseButtons={{
           LEFT: cutMode
             ? undefined
-            : vraMode && annotationMoveMode
+            : annotationMoveMode
               ? THREE.MOUSE.ROTATE
-              : annotationMoveMode
-                ? THREE.MOUSE.PAN
-                : measureMode || gdtMode
-                  ? undefined
-                  : THREE.MOUSE.ROTATE,
+              : pointPickingMode || gdtMode
+                ? undefined
+                : THREE.MOUSE.ROTATE,
           MIDDLE: THREE.MOUSE.DOLLY,
           RIGHT: cutMode ? undefined : THREE.MOUSE.PAN,
         }}
@@ -2695,6 +2694,7 @@ export default function MeshCropEditor({
   const isDirty = histIdx > 0;
   const busy = loading || extractLoading;
   const hasLocalSceneEdits = isGlb ? glbEditVersion > 0 : sceneUrl !== flyUrl;
+  const pointInputMode = measureMode || vraMode;
 
   const stopGdtMode = useCallback(() => {
     setGdtMode(false);
@@ -2748,8 +2748,9 @@ export default function MeshCropEditor({
   const handleToggleVraMode = useCallback(() => {
     const nextVraMode = !vraMode;
 
+    suppressNextMeasureClick.current = false;
     setVraMode(nextVraMode);
-    setMeasureMode(nextVraMode);
+    setMeasureMode(false);
     setMeasurePts([]);
     setAnnotationMoveMode(false);
 
@@ -3414,7 +3415,7 @@ export default function MeshCropEditor({
 
   const handleLegacyViewportPointerDownCapture = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (e.button !== 0 || !isGaussianAsset || busy || measureMode || !(cutMode || e.shiftKey)) {
+      if (e.button !== 0 || !isGaussianAsset || busy || pointInputMode || !(cutMode || e.shiftKey)) {
         return;
       }
 
@@ -3427,7 +3428,7 @@ export default function MeshCropEditor({
       setIsCutDragging(true);
       setCutStroke([point]);
     },
-    [busy, cutMode, getViewportPoint, isGaussianAsset, measureMode],
+    [busy, cutMode, getViewportPoint, isGaussianAsset, pointInputMode],
   );
 
   const handleLegacyViewportPointerMoveCapture = useCallback(
@@ -3485,7 +3486,7 @@ export default function MeshCropEditor({
       clearCutSelectionPreview();
       return;
     }
-    if (cutStroke.length < 2 || busy || measureMode || isExtracted) return;
+    if (cutStroke.length < 2 || busy || pointInputMode || isExtracted) return;
 
     let cancelled = false;
     // 사각형 선택은 드래그 중에도 빠르게 업데이트
@@ -3511,7 +3512,7 @@ export default function MeshCropEditor({
     disposeCutSelection,
     isCutDragging,
     isExtracted,
-    measureMode,
+    pointInputMode,
     replaceCutSelectionPreview,
   ]);
 
@@ -3607,7 +3608,7 @@ export default function MeshCropEditor({
 
   const handleViewportPointerDownCapture = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (e.button !== 0 || busy || measureMode || isExtracted || !(cutMode || e.shiftKey)) {
+      if (e.button !== 0 || busy || pointInputMode || isExtracted || !(cutMode || e.shiftKey)) {
         return;
       }
 
@@ -3622,7 +3623,7 @@ export default function MeshCropEditor({
       setIsCutDragging(true);
       setCutStroke([point]);
     },
-    [busy, clearCutSelectionPreview, cutMode, getViewportPoint, isExtracted, measureMode, isCutDraggingRef],
+    [busy, clearCutSelectionPreview, cutMode, getViewportPoint, isExtracted, pointInputMode, isCutDraggingRef],
   );
 
   const handleViewportPointerMoveCapture = useCallback(
@@ -4009,7 +4010,7 @@ export default function MeshCropEditor({
         return;
       }
 
-      if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'c' && !measureMode && !busy) {
+      if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'c' && !pointInputMode && !busy) {
         e.preventDefault();
         if (cutStroke.length > 0) {
           void handleFreeCut();
@@ -4033,7 +4034,7 @@ export default function MeshCropEditor({
           stopGdtMode();
           return;
         }
-        if (measureMode || vraMode) {
+        if (pointInputMode) {
           stopMeasureMode();
           return;
         }
@@ -4064,10 +4065,9 @@ export default function MeshCropEditor({
     gdtMode,
     isExtracted,
     isGlb,
-    measureMode,
+    pointInputMode,
     stopGdtMode,
     stopMeasureMode,
-    vraMode,
   ]);
 
   const fmt = (arr: number[]) => arr.map((v) => v.toFixed(3)).join(', ');
@@ -4086,7 +4086,7 @@ export default function MeshCropEditor({
     };
   }, []);
 
-  const annotationInputMode = measureMode || gdtMode;
+  const annotationInputMode = pointInputMode || gdtMode;
 
   const editorLayout = (
     <div
@@ -4373,7 +4373,7 @@ export default function MeshCropEditor({
         {cutStroke.length >= 2 ? (
           <button
             onClick={() => void handleFreeCut()}
-            disabled={busy || measureMode || cutStroke.length < 2}
+            disabled={busy || pointInputMode || cutStroke.length < 2}
             title="C: 드래그한 경로 컷 적용"
             className="flex items-center gap-1.5 px-3 py-1 text-xs rounded border border-rose-500 text-rose-200 hover:bg-rose-900/40 disabled:opacity-40"
           >
@@ -4703,6 +4703,12 @@ export default function MeshCropEditor({
               <br />
               <span className="text-gray-400">Esc: 모드 종료 | G: 토글</span>
             </>
+          ) : vraMode ? (
+            <>
+              <span className="text-blue-300 font-medium">VRA 치수 입력</span> | 점 두 개를 클릭해 치수를 추가합니다.
+              <br />
+              <span className="text-gray-400">Esc: 모드 종료</span>
+            </>
           ) : measureMode ? (
             <>
               <span className="text-yellow-300 font-medium">측정 모드</span> | 점을 클릭해 거리를 잽니다.
@@ -4795,48 +4801,9 @@ export default function MeshCropEditor({
               </div>
             </div>
 
-            {/* 캘리브레이션 */}
-            <div className="mb-3">
-              <div className="text-gray-400 mb-1">① 캘리브레이션 (두 점 클릭 후 실제 거리 입력)</div>
-              {measureDistanceRaw !== null ? (
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.001"
-                    value={calibrationInput}
-                    onChange={(e) => setCalibrationInput(e.target.value)}
-                    placeholder="실제 길이"
-                    className="w-24 rounded bg-black/30 border border-gray-700 px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
-                  />
-                  <select
-                    value={calibrationUnit}
-                    onChange={(e) => setCalibrationUnit(e.target.value as 'm' | 'cm' | 'mm')}
-                    className="rounded bg-black/30 border border-gray-700 px-1.5 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="m">m</option>
-                    <option value="cm">cm</option>
-                    <option value="mm">mm</option>
-                  </select>
-                  <button
-                    onClick={() => void handleSaveCalibration()}
-                    disabled={!canSaveCalibration || calibrationSaving}
-                    className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {calibrationSaving ? '저장 중..' : '교정 저장'}
-                  </button>
-                </div>
-              ) : (
-                <div className="text-gray-500 italic">편집기에서 두 점을 클릭하세요</div>
-              )}
-              <div className="mt-1 text-[11px] text-gray-500">보정 배율: {calibrationScale.toFixed(4)}</div>
-            </div>
-
-            <div className="border-t border-gray-700 my-2" />
-
             {/* 10곳 치수 측정 */}
             <div className="mb-2">
-              <div className="text-gray-400 mb-1">② 치수 측정 ({vraPoints.length}/10곳)</div>
+              <div className="text-gray-400 mb-1">① 치수 측정 ({vraPoints.length}/10곳)</div>
               <div className="text-gray-500 text-[11px] mb-2">두 점 클릭 후 "측정값 추가" → 실물 치수 입력</div>
               <button
                 onClick={() => {
@@ -4881,7 +4848,8 @@ export default function MeshCropEditor({
                   <tbody>
                     {vraPoints.map((pt, i) => {
                       const actualNum = parseFloat(pt.actual);
-                      const err = Number.isFinite(actualNum) && actualNum > 0 ? Math.abs(pt.measured - actualNum) : null;
+                      const err = Number.isFinite(actualNum) && actualNum > 0 ? pt.measured - actualNum : null;
+                      const errLabel = err !== null ? `${err > 0 ? '+' : ''}${err.toFixed(1)}` : null;
                       return (
                         <tr key={i} className="border-t border-gray-800">
                           <td className="text-gray-500 pr-1">{i + 1}</td>
@@ -4898,7 +4866,13 @@ export default function MeshCropEditor({
                               className="w-16 rounded bg-black/30 border border-gray-700 px-1 py-0.5 text-right text-gray-100 focus:outline-none focus:border-blue-500"
                             />
                           </td>
-                          <td className="text-right pr-1">{err !== null ? <span className={err <= 15 ? 'text-green-400' : 'text-red-400'}>{err.toFixed(1)}</span> : <span className="text-gray-600">-</span>}</td>
+                          <td className="text-right pr-1">
+                            {err !== null ? (
+                              <span className={err > 0 ? 'text-red-400' : 'text-green-400'}>{errLabel}</span>
+                            ) : (
+                              <span className="text-gray-600">-</span>
+                            )}
+                          </td>
                           <td>
                             <button
                               onClick={() => setVraPoints((prev) => prev.filter((_, j) => j !== i))}
@@ -5190,6 +5164,23 @@ export default function MeshCropEditor({
               className="ml-auto text-gray-500 hover:text-gray-300 px-2 py-0.5 rounded hover:bg-gray-700"
             >
               전체 삭제
+            </button>
+          </>
+        ) : vraMode ? (
+          <>
+            <span className="text-blue-400 font-medium">VRA 치수 입력</span>
+            {measurePts.length === 0 && <span>첫 번째 점을 클릭하세요</span>}
+            {measurePts.length === 1 && <span>두 번째 점을 클릭하세요</span>}
+            {measureDistance !== null && (
+              <span className="font-mono text-blue-300 font-bold text-sm">
+                현재 치수: {(measureDistance * 1000).toFixed(1)}mm
+              </span>
+            )}
+            <button
+              onClick={() => setMeasurePts([])}
+              className="ml-auto text-gray-500 hover:text-gray-300 px-2 py-0.5 rounded hover:bg-gray-700"
+            >
+              초기화
             </button>
           </>
         ) : measureMode ? (
